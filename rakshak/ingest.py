@@ -93,6 +93,33 @@ def _looks_like_json_or_xml(text: str) -> bool:
     return False
 
 
+def _detect_delimiter(text: str, ext: str) -> str:
+    """Detect CSV/TSV delimiter consistently from header and sample rows."""
+    if ext == ".tsv":
+        return "\t"
+    sample_lines = [ln for ln in text.splitlines()[:10] if ln.strip()]
+    if not sample_lines:
+        return ","
+    header = sample_lines[0]
+    candidates = (",", "|", ";", "\t")
+    best_delim = ","
+    best_score = -1
+    for d in candidates:
+        h_count = header.count(d)
+        if h_count == 0:
+            continue
+        # Count how many sample lines have the exact same delimiter count as header
+        consistent = sum(1 for ln in sample_lines[1:] if ln.count(d) == h_count)
+        score = h_count + consistent * 10
+        # Prefer comma slightly on ties
+        if d == ",":
+            score += 1
+        if score > best_score:
+            best_score = score
+            best_delim = d
+    return best_delim
+
+
 def ingest_file(path: Path, inp_root: Path, sha256_hex: str) -> tuple[ParsedFile | None, str | None]:
     """Read, validate, and parse a single input file, or return a quarantine reason."""
     rel = path.relative_to(inp_root).as_posix()
@@ -108,7 +135,7 @@ def ingest_file(path: Path, inp_root: Path, sha256_hex: str) -> tuple[ParsedFile
     if ext in (".csv", ".tsv"):
         if _looks_like_json_or_xml(text):
             return None, "mislabeled_format"
-        delim = "\t" if ext == ".tsv" else ","
+        delim = _detect_delimiter(text, ext)
         try:
             rows = list(csv.reader(io.StringIO(text, newline=""), delimiter=delim))
         except csv.Error:

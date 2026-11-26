@@ -114,13 +114,14 @@ _TEXT_DATE_RE = re.compile(
 
 # Anchored Name/Relation Regexes (use [ \t] to avoid crossing line boundaries)
 _NAME_LABEL_LATIN_RE = re.compile(
-    r"(?i)(\b(?:Patient(?:'s)?[ \t]*Name|Name|Pt\.?[ \t]*Name|Attendant|Guardian|Witnessed[ \t]+by|called[ \t]+by|Report[ \t]+of|Referral)[ \t]*[:：]?[ \t]*)"
-    r"([A-Za-z\u0900-\u097f][A-Za-z\u0900-\u097f.'-]*(?:[ \t]+[A-Za-z\u0900-\u097f][A-Za-z\u0900-\u097f.'-]*){0,3})"
+    r"(?i)(\b(?:Patient(?:'s)?[ \t]*Name|Patient(?=[ \t]*[:：])|Name|Pt\.?[ \t]*Name|Attendant|Guardian|Witnessed[ \t]+by|called[ \t]+by|Report[ \t]+of|Referral)[ \t]*[:：]?[ \t]*)"
+    r"([A-Za-z\u0900-\u097f][A-Za-z\u0900-\u097f.'-]*(?:[ \t]+[A-Za-z\u0900-\u097f][A-Za-z\u0900-\u097f.'-]*){0,3}(?:[ \t]*\([^)\n]{2,50}\))?)"
 )
 _NAME_LABEL_DEVA_RE = re.compile(
     r"((?:मरीज़[ \t]+का[ \t]+नाम|रोगी[ \t]+का[ \t]+नाम|पति[ \t]+का[ \t]+नाम|पिता/पति[ \t]+का[ \t]+नाम|पिता[ \t]+का[ \t]+नाम|नाम)[ \t]*[:：][ \t]*)"
-    r"([\u0900-\u097fA-Za-z]+(?:[ \t]+[\u0900-\u097fA-Za-z]+){0,3})"
+    r"([\u0900-\u097fA-Za-z]+(?:[ \t]+[\u0900-\u097fA-Za-z]+){0,3}(?:[ \t]*\([^)\n]{2,50}\))?)"
 )
+_DEVA_WORD_SEQ_RE = re.compile(r"[\u0900-\u097f]{2,}(?:[ \t]+[\u0900-\u097f]{2,}){0,3}")
 _REL_ANCHOR_RE = re.compile(
     r"(?i)(\b(?:S/[oO]|D/[oO]|W/[oO]|C/[oO]|पुत्र|पुत्री|पत्नी)[ \t]*[:.]?[ \t]*)"
     r"([A-Za-z\u0900-\u097f][A-Za-z\u0900-\u097f.'-]*(?:[ \t]+[A-Za-z\u0900-\u097f][A-Za-z\u0900-\u097f.'-]*){0,2})"
@@ -207,7 +208,7 @@ def classify_field(key: str) -> str:
         return "doctor"
     if k in {"source_path", "filepath", "file_path", "export_path"}:
         return "source_path"
-    if k in {"remarks", "notes", "note", "comment", "comments", "description", "div", "narrative"}:
+    if k in {"remarks", "notes", "note", "comment", "comments", "description", "div", "narrative"} or "summary" in k:
         return "free_text"
     if any(t in k for t in ("aadhaar", "aadhar", "uidai")):
         return "aadhaar"
@@ -221,7 +222,7 @@ def classify_field(key: str) -> str:
         return "insurance"
     if any(t in k for t in ("uhid", "mrn", "patient_ref", "patientid", "patient_id", "reg_no", "regno", "ipd", "adm_no")):
         return "uhid"
-    if any(t in k for t in ("phone", "mobile", "mob", "callback", "telephone", "tel")) or k == "contact":
+    if any(t in k for t in ("phone", "mobile", "mob", "callback", "telephone", "tel", "contact")):
         return "phone"
     if "email" in k or "e_mail" in k:
         return "email"
@@ -241,7 +242,7 @@ def classify_field(key: str) -> str:
         return "tehsil"
     if any(t in k for t in ("district", "jila", "distt")):
         return "district"
-    if k in {"pin", "zip", "pin_code", "pincode", "postal_code", "postalcode"}:
+    if any(t in k for t in ("pin", "zip", "postal")):
         return "pin"
     if any(t in k for t in ("address", "pata", "street", "house", "mohalla", "locality", "landmark")):
         return "address"
@@ -255,7 +256,7 @@ def classify_field(key: str) -> str:
         return "patient_name"
     if k == "name":
         return "ambiguous_name"
-    if any(t in k for t in ("date", "registered", "collected", "reported", "authoredon", "recordeddate", "effective", "performed", "timestamp", "lastupdated", "exported_at", "generated_at", "generated")):
+    if any(t in k for t in ("date", "registered", "collected", "reported", "authoredon", "recordeddate", "effective", "performed", "timestamp", "lastupdated", "exported_at", "generated_at", "generated")) or bool(toks & {"dt"}):
         return "date"
     if k in {"test", "result", "unit", "ref_range", "range", "loinc", "package_code", "procedure", "amount_inr",
              "status", "department", "category", "schedule", "form", "trip", "from", "to", "diagnosis",
@@ -299,15 +300,16 @@ def parse_date_str(val: str, month_first: bool = False) -> tuple[dt.date | None,
     if m:
         a, sep, b, y = int(m.group(1)), m.group(2), int(m.group(3)), int(m.group(4))
         day, mon = (b, a) if month_first else (a, b)
+        fmt_mode = "mdy" if month_first else "dmy"
         if mon > 12 and day <= 12:
             day, mon = mon, day
-        elif day > 12 and mon <= 12 and month_first:
-            day, mon = a, b
+            fmt_mode = "dmy" if month_first else "mdy"
         try:
-            return dt.date(y, mon, day), f"dmy:{sep}" if not month_first else f"mdy:{sep}"
+            return dt.date(y, mon, day), f"{fmt_mode}:{sep}"
         except ValueError:
             try:
-                return dt.date(y, day, mon), f"dmy:{sep}"
+                alt_mode = "dmy" if fmt_mode == "mdy" else "mdy"
+                return dt.date(y, day, mon), f"{alt_mode}:{sep}"
             except ValueError:
                 return None, None
     m = _TEXT_DATE_RE.fullmatch(s)
@@ -406,12 +408,18 @@ def extract_names_from_text(text: str, clues: ClueSet | None = None) -> list[str
             cand = m.group(2).strip(" ,.;:-")
             # Stop before inline labels like Age/Reg/Mob
             cand = re.split(r"\s+(?:Age|Sex|Reg|UHID|Mob|आयु|लिं|पंजी)", cand, 1, flags=re.I)[0].strip()
-            if is_plausible_name_span(cand):
-                found.append(cand)
-                if clues is not None and not any(x in m.group(1).lower() for x in ("attendant", "guardian", "पति", "पिता")):
-                    if not clues.name_raw:
-                        clues.name_raw.append(cand)
-                        clues.name_tokens = tokenize_name(cand)
+            # Split out any parenthesized transliteration/alias like "अनीता देवी (Anita Devi)"
+            paren_m = re.search(r"\(([^)\n]+)\)", cand)
+            parts_to_check = [re.sub(r"\s*\([^)\n]+\)", "", cand).strip()]
+            if paren_m:
+                parts_to_check.append(paren_m.group(1).strip())
+            for part in parts_to_check:
+                if is_plausible_name_span(part):
+                    found.append(part)
+                    if clues is not None and not any(x in m.group(1).lower() for x in ("attendant", "guardian", "पति", "पिता")):
+                        if not clues.name_raw:
+                            clues.name_raw.append(part)
+                            clues.name_tokens = tokenize_name(part)
 
     for m in _REL_ANCHOR_RE.finditer(masked):
         prefix = m.group(1).lower()
@@ -740,9 +748,16 @@ class GlobalScrubber:
             if split_m:
                 tail = val[split_m.start():]
                 val = val[:split_m.start()]
-            if is_plausible_name_span(val):
+            # Check primary part (outside parens) and optional parenthesized alias
+            main_part = re.sub(r"[ \t]*\([^)\n]+\)", "", val).strip()
+            paren_m = re.search(r"\(([^)\n]+)\)", val)
+            ok_main = is_plausible_name_span(main_part)
+            ok_paren = paren_m is not None and is_plausible_name_span(paren_m.group(1))
+            if ok_main or ok_paren:
                 self.stats.identifiers += 1
                 tag = "[RELATIVE_NAME]" if any(x in prefix.lower() for x in ("attendant", "guardian", "पति", "पिता")) else "[PATIENT_NAME]"
+                if ok_main and ok_paren:
+                    return f"{prefix}{tag} ({tag}){tail}"
                 return f"{prefix}{tag}{tail}"
             return m.group(0)
 
@@ -789,6 +804,16 @@ class GlobalScrubber:
                 self.stats.identifiers += 1
                 return "[PATIENT_NAME]"
             s = self._compiled_token_rx.sub(_rep_tok, s)
+
+        # Secondary Devanagari gazetteer sweep for unanchored Devanagari person names
+        def _rep_deva_seq(m: re.Match[str]) -> str:
+            seq = m.group(0)
+            words = seq.split()
+            if all(w in DEVANAGARI_NAMES and w not in NON_PII_WORDS for w in words):
+                self.stats.identifiers += 1
+                return "[PATIENT_NAME]"
+            return seq
+        s = _DEVA_WORD_SEQ_RE.sub(_rep_deva_seq, s)
 
         # 5. Shift dates & generalize ages in text
         if shift_days != 0:
