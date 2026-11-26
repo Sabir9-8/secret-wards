@@ -169,7 +169,8 @@ def phonetic_key(token: str) -> str:
     t = t.replace("sh", "s").replace("z", "j").replace("x", "ks")
     t = t.replace("ck", "k").replace("chh", "ch")
     t = re.sub(r"([a-z])\1+", r"\1", t)  # collapse doubled consonants/vowels (hareesh -> hares, reena -> rina)
-    # Collapse long vowel variants
+    # Collapse long vowel & Hinglish glide variants (e.g. nayar/nair -> ner)
+    t = t.replace("aya", "e").replace("ayi", "i")
     t = t.replace("ee", "i").replace("ea", "i").replace("oo", "u").replace("ou", "u")
     t = t.replace("ai", "e").replace("ei", "i").replace("au", "o")
     # Trailing schwa/ya variations (Pandeya vs Pandey, Rama vs Ram, Fatma vs Fatima)

@@ -179,18 +179,21 @@ def link_and_protect(
             if len(cids) < 2:
                 continue
             kind = key[0]
-            base = cids[0]
-            for other in cids[1:]:
-                if base not in clusters or other not in clusters or base == other:
+            for i in range(len(cids)):
+                cid_a = cids[i]
+                if cid_a not in clusters:
                     continue
-                ca, cb = clusters[base], clusters[other]
-                if not are_compatible(ca, cb):
-                    continue
-                # For phones, require name compatibility if both have names
-                if kind == "phone" and ca.names and cb.names and _best_name_sim(ca.names, cb.names) < 0.78:
-                    continue
-                base = _merge_cids(base, other)
-                changed = True
+                for cid_b in cids[i + 1:]:
+                    if cid_a not in clusters or cid_b not in clusters or cid_a == cid_b:
+                        continue
+                    ca, cb = clusters[cid_a], clusters[cid_b]
+                    if not are_compatible(ca, cb):
+                        continue
+                    # For phones, require name compatibility if both have names
+                    if kind == "phone" and ca.names and cb.names and _best_name_sim(ca.names, cb.names) < 0.78:
+                        continue
+                    cid_a = _merge_cids(cid_a, cid_b)
+                    changed = True
 
     # Tier 2: Cross-hospital / fragmented-note linkage via Name + Secondary Clues (ambiguity-guarded)
     def _pair_score(ca: Cluster, cb: Cluster) -> float:

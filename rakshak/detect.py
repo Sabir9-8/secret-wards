@@ -30,7 +30,12 @@ _AADHAAR_MASKED_RE = re.compile(r"\b[xX*]{4}[-\s]?[xX*]{4}[-\s]?[\d०-९]{4}\b
 _PAN_RE = re.compile(r"\b[A-Z]{5}\d{4}[A-Z]\b")
 _INSURANCE_RE = re.compile(r"\b(?:PMJAY[-/][A-Z0-9-]+|POL/\d{2}/\d{4,})\b", re.I)
 _MRN_RE = re.compile(
-    r"(?<![A-Za-z0-9])(?:SNJ/\d{2}/\d{4,}|JJH-\d{4,}|UHID-\d{4,}|DHH\d{4}-\d{4,}|(?:[A-Z]{2,5}-)?IPD-\d+(?:-\d+)*|IP[-/]\d{2}[-/]\d{4,}|ADM\d{4,})(?![A-Za-z0-9])",
+    r"(?<![A-Za-z0-9])(?:"
+    r"[A-Z]{2,6}(?:[-/][A-Z0-9]{1,5}){1,3}[-/]\d{3,}"
+    r"|(?:SNJ|JJH|DHH|UHID|IPD|ADM|LGC|MRN)[-/]?\d{3,}(?:[-/]\d+)*"
+    r"|DHH\d{4}-\d{4,}"
+    r"|(?:UHID|ADM)\d{4,}"
+    r")(?![A-Za-z0-9])",
     re.I,
 )
 _MRN_LABELED_RE = re.compile(
@@ -150,6 +155,8 @@ _SYMPTOM_HINTS = {
     "fever", "pain", "cough", "cold", "weakness", "vomiting", "headache", "breathlessness",
     "chest", "abdomen", "bukhar", "dm", "dm2", "htn", "diarrhoea", "diarrhea", "rash",
     "swelling", "dizziness", "uti", "dengue", "typhoid", "malaria", "dyspnea", "nausea",
+    "acute", "chronic", "gastritis", "asthma", "hypothyroidism", "hypertension", "diabetes",
+    "pneumonia", "hepatitis", "anaemia", "anemia", "tuberculosis", "infection",
 }
 _ADDRESS_HINTS = {"h.no", "house", "makan", "ward", "mohalla", "vill", "tehsil", "distt", "district", "s/o", "d/o", "w/o"}
 
@@ -208,7 +215,7 @@ def classify_field(key: str) -> str:
         return "doctor"
     if k in {"source_path", "filepath", "file_path", "export_path"}:
         return "source_path"
-    if k in {"remarks", "notes", "note", "comment", "comments", "description", "div", "narrative"} or "summary" in k:
+    if k in {"remarks", "notes", "note", "comment", "comments", "description", "div", "narrative", "tippanee", "tippani", "handover"} or "summary" in k:
         return "free_text"
     if any(t in k for t in ("aadhaar", "aadhar", "uidai")):
         return "aadhaar"
@@ -220,7 +227,7 @@ def classify_field(key: str) -> str:
         return "pan"
     if any(t in k for t in ("pmjay", "policy", "insurance")):
         return "insurance"
-    if any(t in k for t in ("uhid", "mrn", "patient_ref", "patientid", "patient_id", "reg_no", "regno", "ipd", "adm_no")):
+    if any(t in k for t in ("uhid", "mrn", "patient_ref", "patientid", "patient_id", "reg_no", "regno", "ipd", "adm_no", "aaeedee", "uid")):
         return "uhid"
     if any(t in k for t in ("phone", "mobile", "mob", "callback", "telephone", "tel", "contact")):
         return "phone"
@@ -232,7 +239,7 @@ def classify_field(key: str) -> str:
         return "relation"
     if any(t in k for t in ("dob", "birth", "janm")):
         return "dob"
-    if k in {"age", "umar", "ayu", "age_sex", "agesex"}:
+    if k in {"age", "umar", "umr", "ayu", "age_sex", "agesex", "ageyrs", "age_yrs"}:
         return "age"
     if k in {"gender", "sex", "ling"}:
         return "gender"
@@ -252,11 +259,11 @@ def classify_field(key: str) -> str:
         return "first_name"
     if k in {"last_name", "lastname", "last"}:
         return "last_name"
-    if any(t in k for t in ("patient_name", "patientname", "patients_name", "full_name")) or bool(toks & {"naam", "nam"}):
+    if any(t in k for t in ("patient_name", "patientname", "patients_name", "full_name", "beneficiary_name", "patient_label", "patientfullname")) or bool(toks & {"naam", "nam"}):
         return "patient_name"
     if k == "name":
         return "ambiguous_name"
-    if any(t in k for t in ("date", "registered", "collected", "reported", "authoredon", "recordeddate", "effective", "performed", "timestamp", "lastupdated", "exported_at", "generated_at", "generated")) or bool(toks & {"dt"}):
+    if any(t in k for t in ("date", "registered", "collected", "reported", "authoredon", "recordeddate", "effective", "performed", "timestamp", "lastupdated", "exported_at", "generated_at", "generated", "tithi", "admit", "disch")) or bool(toks & {"dt"}):
         return "date"
     if k in {"test", "result", "unit", "ref_range", "range", "loinc", "package_code", "procedure", "amount_inr",
              "status", "department", "category", "schedule", "form", "trip", "from", "to", "diagnosis",
@@ -398,10 +405,11 @@ def extract_names_from_text(text: str, clues: ClueSet | None = None) -> list[str
     txt = _decode_unicode_escapes(text)
     found: list[str] = []
 
-    # Shield doctors & eponyms first
+    # Shield doctors, eponyms, and K/C/O or H/O history clauses first
     masked = _DR_LATIN_RE.sub(" [DR] ", txt)
     masked = _DR_DEVA_RE.sub(" [DR] ", masked)
     masked = _EPONYM_RE.sub(" [EPONYM] ", masked)
+    masked = _HIST_CLAUSE_RE.sub(" [HIST] ", masked)
 
     for rx in (_NAME_LABEL_LATIN_RE, _NAME_LABEL_DEVA_RE):
         for m in rx.finditer(masked):
@@ -426,11 +434,15 @@ def extract_names_from_text(text: str, clues: ClueSet | None = None) -> list[str
         cand = m.group(2).strip(" ,.;:-")
         if prefix.startswith("c/o"):
             cand_low = cand.lower()
+            first_tok = cand.split()[0] if cand.split() else ""
             if any(w in cand_low.split() for w in _SYMPTOM_HINTS) and not any(a in cand_low for a in _ADDRESS_HINTS):
+                continue
+            # Lowercase first word after C/O is a complaint unless in address/name list
+            if first_tok and first_tok[0].islower() and first_tok not in INDIAN_FIRST_NAMES:
                 continue
         if is_plausible_name_span(cand):
             found.append(cand)
-            if clues is not None:
+            if clues is not None and not clues.relative_tokens:
                 clues.relative_raw.append(cand)
                 clues.relative_tokens = tokenize_name(cand)
 
@@ -530,13 +542,16 @@ def filename_has_pii(rel: str, known_name_tokens: set[str]) -> bool:
     stem_spaced = stem.replace("_", " ")
     if _PHONE_RE.search(stem_spaced) or _AADHAAR_RE.search(stem_spaced) or _MRN_RE.search(stem_spaced):
         return True
-    for tok in re.split(r"[_\-\s.]+", stem):
+    toks = [t for t in re.split(r"[_\-\s.]+", stem) if t]
+    for i, tok in enumerate(toks):
         if tok.isdigit() and len(tok) == 10 and tok[0] in "6789":
             return True
-        if tok.lower() in known_name_tokens and not is_clean_non_pii_word(tok):
+        tl = tok.lower()
+        if tl in known_name_tokens and not is_clean_non_pii_word(tok):
             return True
-        if tok.lower() in INDIAN_FIRST_NAMES and len(tok) >= 3:
-            if tok.lower() not in {"clean", "note", "lab", "form", "city", "ward", "bulk", "deep"}:
+        if i + 1 < len(toks):
+            nxt = toks[i + 1].lower()
+            if tl in INDIAN_FIRST_NAMES and nxt in INDIAN_SURNAMES:
                 return True
     return False
 
@@ -647,10 +662,12 @@ class GlobalScrubber:
                 return clause
             if any(w in low.split() for w in _SYMPTOM_HINTS):
                 return _put(m)
-            # Check if first words are a known patient/relative name
-            first_word = body.split(",")[0].split()[0].lower() if body.split() else ""
-            if first_word in self.known_first_tokens or first_word in INDIAN_FIRST_NAMES:
+            first_word = body.split(",")[0].split()[0] if body.split() else ""
+            fl = first_word.lower()
+            if fl in self.known_first_tokens or fl in INDIAN_FIRST_NAMES:
                 return clause
+            if first_word and first_word[0].islower():
+                return _put(m)
             return _put(m)
 
         s = _DR_LATIN_RE.sub(_put, text)

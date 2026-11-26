@@ -151,13 +151,19 @@ def _extract_dict_clues(
             d, _ = parse_date_str(sv, month_first=month_first)
             if d:
                 clues.dob = d
-        elif role == "age" and isinstance(v, (int, float)) or (role == "age" and sv.isdigit()):
-            try:
-                a = int(float(sv))
+        elif role == "age":
+            sv_d = fold_indic_digits(sv).strip()
+            if sv_d.isdigit():
+                a = int(sv_d)
                 if 0 <= a <= 120:
                     clues.age = a
-            except ValueError:
-                pass
+            else:
+                m_as = re.match(r"^(\d{1,3})\s*(?:Yrs?|Y)?\s*/\s*([MF])\b", sv_d, re.I)
+                if m_as:
+                    a = int(m_as.group(1))
+                    if 0 <= a <= 120:
+                        clues.age = a
+                    clues.gender = m_as.group(2).upper()
         elif role == "gender":
             g = norm_gender(sv)
             if g:
