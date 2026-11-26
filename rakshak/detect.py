@@ -19,8 +19,14 @@ from .gazetteer import (
     NON_PII_WORDS,
     TITLE_PREFIXES,
 )
+from .ml_scorer import get_threshold, score_span
 from .policy import age_band, date_shift_days, generalize_pin, hmac_token
 from .translit import devanagari_to_latin, fold_indic_digits, has_devanagari, normalize_text, phonetic_key, tokenize_name
+
+
+def _ml_threshold() -> float:
+    th = get_threshold()
+    return max(float(th) if th is not None else 0.72, 0.75)
 
 # --------------------------------------------------------------------------- Patterns
 _EMAIL_RE = re.compile(r"(?<![A-Za-z0-9_.+-])[A-Za-z0-9_.+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+(?![A-Za-z0-9_.+-])")
@@ -73,6 +79,12 @@ _ADDR_VILLAGE_BEFORE_TEHSIL_RE = re.compile(
 _TEHSIL_ANCHORED_RE = re.compile(
     r"(?i)(?:\bTehsil[ \t]+[A-Za-z]+(?:[ \t]+[A-Za-z]+)?|तहसील[ \t]+[\u0900-\u097f]+)"
 )
+_LOC_ANCHOR_RE = re.compile(
+    r"(?i)(\[HOUSE\]\s*,\s*|(?:नि\.?|निवासी)\s*[:：]\s*)([A-Z\u0900-\u097f][A-Za-z0-9\u0900-\u097f-]*(?:[ \t]+[A-Z\u0900-\u097f][A-Za-z0-9\u0900-\u097f-]*){0,2})"
+)
+_INDIAN_TOWN_SUFFIX_RE = re.compile(
+    r"\b[A-Z][a-z]{2,}(?:nagar|pur|puram|ganj|abad|garh|wadi|vihar|bagh)\b"
+)
 _PIN_LABELED_RE = re.compile(
     r"(?i)((?:PIN(?:\s*Code)?|पिन(?:\s*कोड)?|Zip(?:\s*Code)?|Postal\s*Code)\s*[:：-]?\s*|[-,\\/]\s*)([1-8][\d०-९]{5})(?![\d०-९])"
 )
@@ -82,7 +94,7 @@ _WIN_PATH_RE = re.compile(r"\b[A-Za-z]:\\[^\s\"',;)]+")
 _DR_LATIN_RE = re.compile(r"\bDr\.?[ \t]+(?:[A-Z][a-zA-Z.'-]+(?:[ \t]+[A-Z][a-zA-Z.'-]+){0,3})")
 _DR_DEVA_RE = re.compile(r"डॉ\.?[ \t]*[\u0900-\u097f]+(?:[ \t]+[\u0900-\u097f]+){0,3}")
 _EPONYM_RE = re.compile(
-    r"\b[A-Za-z]+(?:'s|s')?[ \t]+(?:" + "|".join(DISEASE_EPONYM_SUFFIXES) + r")\b",
+    r"\b[A-Za-zÀ-ÖØ-öø-ÿ]+(?:-[A-Za-zÀ-ÖØ-öø-ÿ]+){0,2}(?:'s|’s|s')?[ \t]+(?:" + "|".join(DISEASE_EPONYM_SUFFIXES) + r")\b",
     re.I,
 )
 _DOSE_DUR_RE = re.compile(
@@ -98,7 +110,7 @@ _LAB_RANGE_RE = re.compile(
 )
 _ICD_RE = re.compile(r"\b[A-TV-Z]\d{2}(?:\.\d{1,2})?\b")
 _HIST_CLAUSE_RE = re.compile(r"(?i)\b(?:No\s+)?(?:K/C/O|H/O)\s*:?\s*[^.\n;]+")
-_CO_CLAUSE_RE = re.compile(r"(?i)\bC/O\s*:?\s*[^.\n;]+")
+_CO_CLAUSE_RE = re.compile(r"(?i)(?:\bC/O|सी/ओ)\s*:?\s*[^.\n;]+")
 
 # Base64 candidate runs
 _B64_RE = re.compile(r"^[A-Za-z0-9+/]{24,}={0,2}$")
@@ -132,8 +144,54 @@ _NAME_LABEL_DEVA_RE = re.compile(
     r"([\u0900-\u097fA-Za-z]+(?:[ \t]+[\u0900-\u097fA-Za-z]+){0,3}(?:[ \t]*\([^)\n]{2,50}\))?)"
 )
 _DEVA_WORD_SEQ_RE = re.compile(r"[\u0900-\u097f]{2,}(?:[ \t]+[\u0900-\u097f]{2,}){0,3}")
+_ML_LATIN_CAND_RE = re.compile(r"(?<![A-Za-z0-9_\[-])([A-Z][a-z]{2,}(?:[ \t]+[A-Z][a-z]{2,})+)(?![A-Za-z0-9_\]])")
+_ML_DEVA_CAND_RE = re.compile(r"([\u0900-\u097f]{2,}(?:[ \t]+[\u0900-\u097f]{2,})+)")
+_ML_NON_PII_EXTRA = {
+    "random", "total", "urinary", "tract", "management", "protocol", "standard",
+    "guidelines", "presenting", "course", "diagnostic", "visitor", "log",
+    "document", "system", "routine", "nodal", "officer", "workers", "worker",
+    "differential", "catheter", "lactate", "ringer", "foley", "koch", "type",
+    "essential", "primary", "hospital", "medical", "treatment", "health", "center",
+    "centre", "review", "advice", "medications", "follow", "ward", "bed",
+}
+_ML_LOC_HINTS = {
+    "mohalla", "nagar", "colony", "bazar", "bazaar", "ganj", "pur", "purwa",
+    "kalan", "khurd", "gaon", "gram", "tehsil", "mandi", "road", "lane",
+    "street", "marg", "chowk", "vihar", "enclave", "sector", "block", "bagh",
+    "मोहल्ला", "नगर", "ग्राम", "गाँव", "गली", "कॉलोनी", "रोड", "कलां", "खुर्द",
+}
+
+
+def _classify_ml_tag(cand: str, left_ctx: str, right_ctx: str) -> str:
+    lc_low = left_ctx.lower()
+    if re.search(r"(?:s/[o0]|d/[o0]|w/[o0]|c/[o0]|attendant|guardian|caregiver|पिता|पति)\s*[:.]?\s*$", lc_low):
+        return "[RELATIVE_NAME]"
+    if re.search(r"(?:vill(?:age)?|gaon|gram|ग्राम|गाँव)\s*[:.]?\s*$", lc_low):
+        return "[VILLAGE]"
+    cand_toks = {t.lower() for t in re.split(r"\s+", cand)}
+    if (cand_toks & _ML_LOC_HINTS) or re.search(r"(?:address|pata|mohalla|locality|पता|मोहल्ला)\s*[:.]?\s*$", lc_low) or re.match(r"^\s*[,-]?\s*[1-8]\d{5}\b", right_ctx):
+        return "[LOCALITY]"
+    return "[PATIENT_NAME]"
+
+
+def _ml_is_eligible_candidate(cand: str, left_ctx: str) -> bool:
+    if not cand or "\x00" in cand or "[" in cand or "]" in cand or "PSN-" in cand:
+        return False
+    low = cand.lower()
+    if any(hm in low for hm in HOSPITAL_MARKERS):
+        return False
+    if left_ctx.rstrip().lower().endswith(("dr.", "dr", "डॉ.", "डॉ")):
+        return False
+    toks = [t.strip(".,'\"") for t in re.split(r"\s+", cand) if t.strip(".,'\"")]
+    if len(toks) < 2:
+        return False
+    for t in toks:
+        tl = t.lower()
+        if is_clean_non_pii_word(t) or tl in _ML_NON_PII_EXTRA or tl in TITLE_PREFIXES or tl in HONORIFIC_SUFFIXES:
+            return False
+    return True
 _REL_ANCHOR_RE = re.compile(
-    r"(?i)(\b(?:S/[oO]|D/[oO]|W/[oO]|C/[oO]|पुत्र|पुत्री|पत्नी)[ \t]*[:.]?[ \t]*)"
+    r"(?i)((?:\b(?:S/[oO]|D/[oO]|W/[oO]|C/[oO]|पुत्र|पुत्री|पत्नी)|सी/ओ)[ \t]*[:.]?[ \t]*)"
     r"([A-Za-z\u0900-\u097f][A-Za-z\u0900-\u097f.'-]*(?:[ \t]+[A-Za-z\u0900-\u097f][A-Za-z\u0900-\u097f.'-]*){0,2})"
 )
 _HONORIFIC_LATIN_RE = re.compile(
@@ -143,8 +201,33 @@ _HINGLISH_POSSESSIVE_RE = re.compile(
     r"\b([A-Z][a-z]{2,}(?:[ \t]+[A-Z][a-z]{2,})?)(?='s[ \t]+attendant|[ \t]+(?:ka|ki|ke|ko|ne)[ \t]+(?:BP|condition|tabiyat|bukhar|sugar|fever|health|dawa|report))"
 )
 _DEVA_KO_RE = re.compile(
-    r"([\u0900-\u097f]{2,}(?:[ \t]+[\u0900-\u097f]{2,}){0,2})[ \t]+(?:को|की|के|ने|जी|साहब|दीदी|बहनजी|भैया|अम्मा)\b"
+    r"([\u0900-\u097f]{2,}(?:[ \t]+[\u0900-\u097f]{2,}){0,2})[ \t]+(को|की|के|ने|जी|साहब|दीदी|बहनजी|भैया|अम्मा)(?![\u0900-\u097f])"
 )
+_DEVA_LANDMARK_NOUNS = {
+    "मंदिर", "भवन", "मस्जिद", "गुरुद्वारा", "चर्च", "स्कूल", "विद्यालय", "महाविद्यालय",
+    "थाना", "स्टेशन", "चौक", "बाजार", "बाज़ार", "तालाब", "दरवाजा", "पंचायत",
+}
+_ADDR_SKIP_FIRST_TOKS = {
+    "vill", "village", "gaon", "gram", "mohalla", "ward", "tehsil", "distt", "dist",
+    "district", "near", "opp", "opposite", "behind", "pin", "c/o", "house", "plot", "flat",
+    "ग्राम", "गाँव", "मोहल्ला", "वार्ड", "तहसील", "जिला", "पिन", "पास", "सामने", "पीछे",
+}
+
+
+def _extract_deva_ko_name(span: str, post: str, known_first: set[str] | None = None) -> str | None:
+    parts = span.split()
+    while parts and is_clean_non_pii_word(parts[0]):
+        parts.pop(0)
+    if not parts:
+        return None
+    if any(p in _DEVA_LANDMARK_NOUNS for p in parts):
+        return None
+    name_part = " ".join(parts)
+    if len(parts) == 1 and post in ("की", "के", "को", "ने"):
+        tl = devanagari_to_latin(parts[0]).strip().lower()
+        if tl not in INDIAN_FIRST_NAMES and (not known_first or tl not in known_first):
+            return None
+    return name_part if is_plausible_name_span(name_part) else None
 _SAMPLE_FROM_RE = re.compile(r"(?i)(Sample[ \t]+received[ \t]+from[ \t]+)([A-Za-z]+(?:'s)?)")
 _COMMA_REL_NAME_RE = re.compile(r"\b([A-Z][a-z]{2,}(?:[ \t]+[A-Z][a-z]{2,})?)[ \t]*,[ \t]*(?=(?:W/o|S/o|D/o|\d{1,3}[ \t]*(?:Y|Yrs?)[ \t]*/[ \t]*[MF]))")
 _TIMELOG_ROLE_NAME_RE = re.compile(
@@ -162,8 +245,49 @@ _SYMPTOM_HINTS = {
     "swelling", "dizziness", "uti", "dengue", "typhoid", "malaria", "dyspnea", "nausea",
     "acute", "chronic", "gastritis", "asthma", "hypothyroidism", "hypertension", "diabetes",
     "pneumonia", "hepatitis", "anaemia", "anemia", "tuberculosis", "infection",
+    "contrast", "complication", "complications", "distress", "bleeding", "complaints",
+    "बुखार", "खांसी", "दर्द", "तेज", "तेज़", "कमजोरी", "उल्टी", "दस्त", "चक्कर", "सांस", "साँस", "सीने", "पेट",
 }
-_ADDRESS_HINTS = {"h.no", "house", "makan", "ward", "mohalla", "vill", "tehsil", "distt", "district", "s/o", "d/o", "w/o"}
+_ADDRESS_HINTS = {
+    "h.no", "house", "makan", "ward", "mohalla", "vill", "tehsil", "distt", "district",
+    "s/o", "d/o", "w/o", "पता", "मकान", "ग्राम", "गाँव", "वार्ड", "मोहल्ला", "तहसील", "जिला",
+}
+
+
+def _should_preserve_clinical_rel(
+    prefix: str, val: str, known_first: set[str] | None = None, rc_tail: str = ""
+) -> bool:
+    """Return True when a C/O, सी/ओ, or w/o span expresses a clinical finding rather than a relative."""
+    pl = prefix.strip().lower()
+    val_low = val.lower()
+    first_tok = val.split(",")[0].split()[0] if val.split() else ""
+    fl = first_tok.lower()
+    if pl.startswith(("c/o", "सी/ओ")):
+        if "\x00shld" in val_low:
+            return True
+        has_addr = any(a in val_low for a in _ADDRESS_HINTS)
+        if not has_addr and any(w.strip(".,;:") in _SYMPTOM_HINTS for w in val_low.split()):
+            return True
+        if first_tok and first_tok.isascii() and first_tok[0].islower() and fl not in INDIAN_FIRST_NAMES and (not known_first or fl not in known_first):
+            return True
+        is_known = (
+            fl in INDIAN_FIRST_NAMES
+            or first_tok in DEVANAGARI_NAMES
+            or (known_first is not None and (fl in known_first or first_tok in known_first))
+        )
+        if not has_addr and not is_known:
+            sc = score_span(val, left_ctx=prefix, right_ctx=rc_tail)
+            if sc is not None and sc < _ml_threshold():
+                return True
+        return False
+    if pl.startswith("w/o"):
+        if fl in _SYMPTOM_HINTS:
+            return True
+        if first_tok and first_tok.isascii() and first_tok[0].islower() and fl not in INDIAN_FIRST_NAMES and (not known_first or fl not in known_first):
+            sc = score_span(val, left_ctx=prefix, right_ctx=rc_tail)
+            if sc is None or sc < _ml_threshold():
+                return True
+    return False
 
 
 @dataclass
@@ -189,6 +313,7 @@ class ClueSet:
     district: str | None = None
     pin: str | None = None
     diagnoses: set[str] = field(default_factory=set)
+    event_dates: set[dt.date] = field(default_factory=set)
     patient_key: str | None = None
     pseudonym: str | None = None
     date_shift: int = 0
@@ -204,6 +329,11 @@ class DetectionStats:
         self.linked = 0
         self.generalized = 0
         self.suppressed = 0
+        self.entities: dict[str, int] = {}
+
+    def bump(self, entity_type: str, count: int = 1) -> None:
+        if count > 0 and entity_type:
+            self.entities[entity_type] = self.entities.get(entity_type, 0) + count
 
 
 def classify_field(key: str) -> str:
@@ -220,7 +350,7 @@ def classify_field(key: str) -> str:
         return "doctor"
     if k in {"source_path", "filepath", "file_path", "export_path", "export_origin"}:
         return "source_path"
-    if k in {"remarks", "notes", "note", "comment", "comments", "description", "div", "narrative", "tippanee", "tippani", "handover"} or "summary" in k:
+    if bool(toks & {"remark", "remarks", "note", "notes", "comment", "comments", "description", "div", "narrative", "tippanee", "tippani", "handover", "summary", "details"}) or "summary" in k:
         return "free_text"
     if any(t in k for t in ("aadhaar", "aadhar", "uidai")):
         return "aadhaar"
@@ -435,16 +565,11 @@ def extract_names_from_text(text: str, clues: ClueSet | None = None) -> list[str
                             clues.name_tokens = tokenize_name(part)
 
     for m in _REL_ANCHOR_RE.finditer(masked):
-        prefix = m.group(1).lower()
+        prefix = m.group(1)
         cand = m.group(2).strip(" ,.;:-")
-        if prefix.startswith("c/o"):
-            cand_low = cand.lower()
-            first_tok = cand.split()[0] if cand.split() else ""
-            if any(w in cand_low.split() for w in _SYMPTOM_HINTS) and not any(a in cand_low for a in _ADDRESS_HINTS):
-                continue
-            # Lowercase first word after C/O is a complaint unless in address/name list
-            if first_tok and first_tok[0].islower() and first_tok not in INDIAN_FIRST_NAMES:
-                continue
+        rc_tail = masked[m.end() : m.end() + 40]
+        if _should_preserve_clinical_rel(prefix, cand, rc_tail=rc_tail):
+            continue
         if is_plausible_name_span(cand):
             found.append(cand)
             if clues is not None and not clues.relative_tokens:
@@ -453,12 +578,18 @@ def extract_names_from_text(text: str, clues: ClueSet | None = None) -> list[str
 
     for rx in (_HONORIFIC_LATIN_RE, _HINGLISH_POSSESSIVE_RE, _DEVA_KO_RE, _COMMA_REL_NAME_RE, _TIMELOG_ROLE_NAME_RE):
         for m in rx.finditer(masked):
-            cand = m.group(1).strip(" ,.;:-")
-            if is_plausible_name_span(cand):
-                found.append(cand)
-                if clues is not None and not clues.name_raw:
-                    clues.name_raw.append(cand)
-                    clues.name_tokens = tokenize_name(cand)
+            if rx is _DEVA_KO_RE:
+                cand = _extract_deva_ko_name(m.group(1), m.group(2))
+                if not cand:
+                    continue
+            else:
+                cand = m.group(1).strip(" ,.;:-")
+                if not is_plausible_name_span(cand):
+                    continue
+            found.append(cand)
+            if clues is not None and not clues.name_raw:
+                clues.name_raw.append(cand)
+                clues.name_tokens = tokenize_name(cand)
 
     return found
 
@@ -522,6 +653,13 @@ def extract_clues_from_text(text: str, clues: ClueSet, month_first: bool = False
         d, _ = parse_date_str(m_dob.group(1), month_first=month_first)
         if d:
             clues.dob = d
+
+    # Clinical / admission / visit dates (for within-record DOB collision avoidance)
+    for rx_d in (_ISO_DT_RE, _SLASH_DATE_RE, _TEXT_DATE_RE):
+        for m_dt in rx_d.finditer(txt):
+            d_ev, _ = parse_date_str(m_dt.group(0), month_first=month_first)
+            if d_ev and d_ev != clues.dob:
+                clues.event_dates.add(d_ev)
 
     # Village / District / PIN
     m_v = _VILLAGE_ANCHORED_RE.search(txt)
@@ -677,20 +815,12 @@ class GlobalScrubber:
 
         def _maybe_co(m: re.Match[str]) -> str:
             clause = m.group(0)
-            body = re.sub(r"(?i)^C/O\s*:?\s*", "", clause).strip()
-            low = body.lower()
-            # If body looks like an address or relative, do NOT shield
-            if any(h in low for h in _ADDRESS_HINTS):
-                return clause
-            if any(w in low.split() for w in _SYMPTOM_HINTS):
+            pm = re.match(r"(?i)^(?:C/O|सी/ओ)\s*:?\s*", clause)
+            prefix = pm.group(0) if pm else "C/O "
+            body = clause[len(prefix):].strip()
+            if _should_preserve_clinical_rel(prefix, body, known_first=self.known_first_tokens):
                 return _put(m)
-            first_word = body.split(",")[0].split()[0] if body.split() else ""
-            fl = first_word.lower()
-            if fl in self.known_first_tokens or fl in INDIAN_FIRST_NAMES:
-                return clause
-            if first_word and first_word[0].islower():
-                return _put(m)
-            return _put(m)
+            return clause
 
         s = _DR_LATIN_RE.sub(_put, text)
         s = _DR_DEVA_RE.sub(_put, s)
@@ -752,9 +882,13 @@ class GlobalScrubber:
         s = normalize_text(_decode_unicode_escapes(text))
         s, shields = self._shield_clinical(s)
 
-        def _sub(rx: re.Pattern[str], repl: Any, txt: str) -> str:
+        def _sub(rx: re.Pattern[str], repl: Any, txt: str, tag: str | None = None) -> str:
             out, n = rx.subn(repl, txt)
-            self.stats.identifiers += n
+            if n:
+                self.stats.identifiers += n
+                label = tag or (repl.strip("[]") if isinstance(repl, str) and repl.startswith("[") and repl.endswith("]") else None)
+                if label:
+                    self.stats.bump(label, n)
             return out
 
         # 1. Direct structured IDs & contact patterns
@@ -766,10 +900,10 @@ class GlobalScrubber:
         s = _sub(_PAN_RE, "[PAN]", s)
         s = _sub(_INSURANCE_RE, "[INSURANCE_ID]", s)
         s = _sub(_MRN_RE, "[MRN]", s)
-        s = _sub(_MRN_LABELED_RE, r"\1[MRN]", s)
+        s = _sub(_MRN_LABELED_RE, r"\1[MRN]", s, tag="MRN")
         s = _sub(_PHONE_RE, "[PHONE]", s)
         s = _sub(_PHONE_MASKED_RE, "[PHONE]", s)
-        s = _sub(_PHONE_LABELED_RE, r"\1[PHONE]", s)
+        s = _sub(_PHONE_LABELED_RE, r"\1[PHONE]", s, tag="PHONE")
 
         # 1b. Windows export paths (e.g., D:\Exports\Place\410401\out.json)
         s = _sub(_WIN_PATH_RE, "[SOURCE_PATH]", s)
@@ -780,12 +914,42 @@ class GlobalScrubber:
         s = _sub(_RES_WARD_RE, "[LOCALITY]", s)
         s = _sub(_LANDMARK_RE, "[LANDMARK]", s)
         s = _sub(_VILLAGE_ANCHORED_RE, "[VILLAGE]", s)
-        s = _ADDR_VILLAGE_BEFORE_TEHSIL_RE.sub(lambda m: f"{m.group(1)}[VILLAGE]" if not is_clean_non_pii_word(m.group(2)) else m.group(0), s)
+
+        def _rep_v_before_t(m: re.Match[str]) -> str:
+            if is_clean_non_pii_word(m.group(2)):
+                return m.group(0)
+            self.stats.identifiers += 1
+            self.stats.bump("VILLAGE")
+            return f"{m.group(1)}[VILLAGE]"
+
+        s = _ADDR_VILLAGE_BEFORE_TEHSIL_RE.sub(_rep_v_before_t, s)
         s = _sub(_TEHSIL_ANCHORED_RE, "[TEHSIL]", s)
-        s = _PIN_LABELED_RE.sub(
-            lambda m: m.group(1) + ("******" if suppress_location else generalize_pin(fold_indic_digits(m.group(2)), 3)),
-            s,
-        )
+
+        def _rep_loc_anchor(m: re.Match[str]) -> str:
+            loc = m.group(2).strip()
+            first = re.split(r"[\s.]+", loc)[0].lower() if loc else ""
+            if not first or first in _ADDR_SKIP_FIRST_TOKS or is_clean_non_pii_word(first):
+                return m.group(0)
+            self.stats.identifiers += 1
+            self.stats.bump("LOCALITY")
+            return f"{m.group(1)}[LOCALITY]"
+
+        s = _LOC_ANCHOR_RE.sub(_rep_loc_anchor, s)
+
+        def _rep_town_suffix(m: re.Match[str]) -> str:
+            if is_clean_non_pii_word(m.group(0)):
+                return m.group(0)
+            self.stats.identifiers += 1
+            self.stats.bump("LOCALITY")
+            return "[LOCALITY]"
+
+        s = _INDIAN_TOWN_SUFFIX_RE.sub(_rep_town_suffix, s)
+
+        def _rep_pin_labeled(m: re.Match[str]) -> str:
+            self.stats.bump("PIN")
+            return m.group(1) + ("******" if suppress_location else generalize_pin(fold_indic_digits(m.group(2)), 3))
+
+        s = _PIN_LABELED_RE.sub(_rep_pin_labeled, s)
 
         # 3. Anchored names & relatives
         def _rep_label(m: re.Match[str]) -> str:
@@ -803,7 +967,9 @@ class GlobalScrubber:
             ok_paren = paren_m is not None and is_plausible_name_span(paren_m.group(1))
             if ok_main or ok_paren:
                 self.stats.identifiers += 1
-                tag = "[RELATIVE_NAME]" if any(x in prefix.lower() for x in ("attendant", "guardian", "पति", "पिता")) else "[PATIENT_NAME]"
+                is_rel = any(x in prefix.lower() for x in ("attendant", "guardian", "पति", "पिता"))
+                tag = "[RELATIVE_NAME]" if is_rel else "[PATIENT_NAME]"
+                self.stats.bump("RELATIVE_NAME" if is_rel else "PATIENT_NAME")
                 if ok_main and ok_paren:
                     return f"{prefix}{tag} ({tag}){tail}"
                 return f"{prefix}{tag}{tail}"
@@ -814,25 +980,40 @@ class GlobalScrubber:
 
         def _rep_rel(m: re.Match[str]) -> str:
             prefix, val = m.group(1), m.group(2)
-            if prefix.lower().startswith("c/o"):
-                low = val.lower()
-                if any(w in low.split() for w in _SYMPTOM_HINTS) and not any(a in low for a in _ADDRESS_HINTS):
-                    return m.group(0)
+            if _should_preserve_clinical_rel(prefix, val, known_first=self.known_first_tokens):
+                return m.group(0)
             if is_plausible_name_span(val):
                 self.stats.identifiers += 1
+                self.stats.bump("RELATIVE_NAME")
                 return f"{prefix}[RELATIVE_NAME]"
             return m.group(0)
 
         s = _REL_ANCHOR_RE.sub(_rep_rel, s)
-        s = _SAMPLE_FROM_RE.sub(lambda m: f"{m.group(1)}[PATIENT_NAME]" if is_plausible_name_span(m.group(2)) else m.group(0), s)
-        s = _TIMELOG_ROLE_NAME_RE.sub(lambda m: m.group(0).replace(m.group(1), "[PATIENT_NAME]", 1) if is_plausible_name_span(m.group(1)) else m.group(0), s)
-        s = _HONORIFIC_LATIN_RE.sub(lambda m: f"[PATIENT_NAME] {m.group(2)}" if is_plausible_name_span(m.group(1)) else m.group(0), s)
-        s = _HINGLISH_POSSESSIVE_RE.sub(lambda m: "[PATIENT_NAME]" if is_plausible_name_span(m.group(1)) else m.group(0), s)
-        s = _COMMA_REL_NAME_RE.sub(lambda m: "[PATIENT_NAME], " if is_plausible_name_span(m.group(1)) else m.group(0), s)
-        s = _DEVA_KO_RE.sub(
-            lambda m: m.group(0).replace(m.group(1), "[PATIENT_NAME]", 1) if is_plausible_name_span(m.group(1)) else m.group(0),
-            s,
-        )
+
+        def _bump_patient_sub(rx: re.Pattern[str], fmt_fn: Any, txt: str) -> str:
+            def _wrap(m: re.Match[str]) -> str:
+                out = fmt_fn(m)
+                if out != m.group(0):
+                    self.stats.identifiers += 1
+                    self.stats.bump("PATIENT_NAME")
+                return out
+            return rx.sub(_wrap, txt)
+
+        s = _bump_patient_sub(_SAMPLE_FROM_RE, lambda m: f"{m.group(1)}[PATIENT_NAME]" if is_plausible_name_span(m.group(2)) else m.group(0), s)
+        s = _bump_patient_sub(_TIMELOG_ROLE_NAME_RE, lambda m: m.group(0).replace(m.group(1), "[PATIENT_NAME]", 1) if is_plausible_name_span(m.group(1)) else m.group(0), s)
+        s = _bump_patient_sub(_HONORIFIC_LATIN_RE, lambda m: f"[PATIENT_NAME] {m.group(2)}" if is_plausible_name_span(m.group(1)) else m.group(0), s)
+        s = _bump_patient_sub(_HINGLISH_POSSESSIVE_RE, lambda m: "[PATIENT_NAME]" if is_plausible_name_span(m.group(1)) else m.group(0), s)
+        s = _bump_patient_sub(_COMMA_REL_NAME_RE, lambda m: "[PATIENT_NAME], " if is_plausible_name_span(m.group(1)) else m.group(0), s)
+
+        def _rep_deva_ko(m: re.Match[str]) -> str:
+            name_part = _extract_deva_ko_name(m.group(1), m.group(2), known_first=self.known_first_tokens)
+            if name_part:
+                self.stats.identifiers += 1
+                self.stats.bump("PATIENT_NAME")
+                return m.group(0).replace(name_part, "[PATIENT_NAME]", 1)
+            return m.group(0)
+
+        s = _DEVA_KO_RE.sub(_rep_deva_ko, s)
 
         # 4. Pass-2 global name lexicon + gazetteer sweep
         if self._compiled_full_rx is not None:
@@ -841,6 +1022,7 @@ class GlobalScrubber:
                 if is_clean_non_pii_word(tok):
                     return tok
                 self.stats.identifiers += 1
+                self.stats.bump("PATIENT_NAME")
                 return "[PATIENT_NAME]"
             s = self._compiled_full_rx.sub(_rep_full, s)
 
@@ -850,6 +1032,7 @@ class GlobalScrubber:
                 if is_clean_non_pii_word(tok):
                     return tok
                 self.stats.identifiers += 1
+                self.stats.bump("PATIENT_NAME")
                 return "[PATIENT_NAME]"
             s = self._compiled_token_rx.sub(_rep_tok, s)
 
@@ -859,9 +1042,74 @@ class GlobalScrubber:
             words = seq.split()
             if all(w in DEVANAGARI_NAMES and w not in NON_PII_WORDS for w in words):
                 self.stats.identifiers += 1
+                self.stats.bump("PATIENT_NAME")
                 return "[PATIENT_NAME]"
             return seq
         s = _DEVA_WORD_SEQ_RE.sub(_rep_deva_seq, s)
+
+        # 4b. Conservative classical ML disambiguator on remaining ambiguous unanchored multi-word spans
+        ml_thresh = _ml_threshold()
+
+        def _ml_sweep(rx: re.Pattern[str], txt: str) -> str:
+            out_parts: list[str] = []
+            last_end = 0
+            for m in rx.finditer(txt):
+                base_start = m.start(1)
+                tok_matches = list(re.finditer(r"\S+", m.group(1)))
+                runs: list[list[tuple[int, int]]] = []
+                cur: list[tuple[int, int]] = []
+                for tm in tok_matches:
+                    w = tm.group(0)
+                    wl = w.strip(".,'\"").lower()
+                    is_stop = (
+                        is_clean_non_pii_word(w)
+                        or wl in _ML_NON_PII_EXTRA
+                        or wl in TITLE_PREFIXES
+                        or wl in HONORIFIC_SUFFIXES
+                    )
+                    if is_stop:
+                        if cur:
+                            runs.append(cur)
+                            cur = []
+                    else:
+                        cur.append((base_start + tm.start(), base_start + tm.end()))
+                if cur:
+                    runs.append(cur)
+
+                for run in runs:
+                    i = 0
+                    while i + 1 < len(run):
+                        matched = False
+                        for k in (3, 2):
+                            if i + k > len(run):
+                                continue
+                            c_start, c_end = run[i][0], run[i + k - 1][1]
+                            if c_start < last_end:
+                                continue
+                            cand = txt[c_start:c_end]
+                            lc = txt[max(0, c_start - 60) : c_start]
+                            rc = txt[c_end : min(len(txt), c_end + 60)]
+                            if _ml_is_eligible_candidate(cand, lc):
+                                sc = score_span(cand, left_ctx=lc, right_ctx=rc)
+                                if sc is not None and sc >= ml_thresh:
+                                    tag = _classify_ml_tag(cand, lc, rc)
+                                    out_parts.append(txt[last_end:c_start])
+                                    out_parts.append(tag)
+                                    last_end = c_end
+                                    self.stats.identifiers += 1
+                                    self.stats.bump(tag.strip("[]"))
+                                    i += k
+                                    matched = True
+                                    break
+                        if not matched:
+                            i += 1
+            if last_end == 0:
+                return txt
+            out_parts.append(txt[last_end:])
+            return "".join(out_parts)
+
+        s = _ml_sweep(_ML_LATIN_CAND_RE, s)
+        s = _ml_sweep(_ML_DEVA_CAND_RE, s)
 
         # 5. Shift dates & generalize ages in text
         if shift_days != 0:
