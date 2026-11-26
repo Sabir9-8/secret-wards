@@ -1,0 +1,28 @@
+# Virtual environments
+.venv/
+venv/
+
+# Python caches & build artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# OS & editor files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.vscode/
+.idea/
+
+# Local test & evaluation outputs
+my_output*/
+out/
+out_*/
+/tmp/
+*.tmp
+*.log
