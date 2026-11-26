@@ -1,0 +1,162 @@
+"""General Indian name gazetteers (Latin & Devanagari), clinical non-PII allowlists, and trap vocabularies."""
+from __future__ import annotations
+
+# Common Indian given names (Latin) - used ONLY as secondary signal when NOT in protected clinical/allowlist contexts
+INDIAN_FIRST_NAMES = {
+    "aaditya", "aarti", "abhishek", "aditi", "ajay", "akash", "akram", "alok", "aman", "amar",
+    "amit", "amita", "amrit", "anand", "anil", "anita", "anjali", "ankit", "ankita", "anthony",
+    "anu", "anuj", "anup", "anurag", "archana", "arjun", "arun", "arvind", "asha", "ashish",
+    "ashok", "ashwini", "avinash", "ayesha", "babita", "balram", "bharti", "bhavna", "brijesh",
+    "chandan", "chandra", "deepa", "deepak", "dev", "devendra", "dheeraj", "dilip", "dinesh",
+    "divya", "farhan", "farida", "fatima", "fatma", "gagan", "ganesh", "gaurav", "geeta", "gita",
+    "gopal", "govind", "gulshan", "gurcharan", "gurpreet", "hareesh", "harish", "harpreet",
+    "harsh", "hema", "hemant", "ilavenil", "imran", "imtiaz", "indu", "irfan", "ishwar",
+    "jagdish", "javed", "jaya", "jayant", "jaspreet", "jeetu", "jitendra", "jyoti", "kajal",
+    "kalpana", "kamal", "kamala", "kamla", "kanchan", "kapil", "karan", "karim", "kartik",
+    "kaveri", "kavita", "kiran", "kishan", "komal", "krishna", "kuldeep", "kunal", "kusum",
+    "lakshmi", "lalit", "lata", "laxmi", "lokesh", "madan", "madhu", "mahesh", "mamta",
+    "manish", "manju", "manoj", "mary", "maya", "meena", "meera", "mohammad", "mohammed",
+    "mohd", "mohan", "mohit", "mukesh", "munna", "murari", "nadeem", "nandini", "naresh",
+    "naseem", "naveen", "neelam", "neeraj", "neha", "nidhi", "nikhil", "nirmala", "nisha",
+    "nitin", "om", "pankaj", "parvati", "pawan", "pooja", "poonam", "prabhu", "pradeep",
+    "prakash", "pramod", "prashant", "pratibha", "praveen", "preeti", "prem", "priya",
+    "priyanka", "pushpa", "radha", "raghav", "rahul", "raj", "rajan", "rajeev", "rajendra",
+    "rajesh", "rajiv", "rajni", "raju", "rakesh", "ram", "rama", "ramesh", "ramu", "rani",
+    "ranjana", "ranjit", "rashmi", "ravi", "ravindra", "rekha", "reena", "renu", "rina",
+    "rishabh", "ritu", "rohan", "rohit", "roshan", "rubina", "rukhsana", "sachin", "sadhana",
+    "sagar", "sahil", "sajid", "salim", "salma", "sameer", "sandeep", "sangeeta", "sanjay",
+    "sanjeev", "santosh", "sapna", "sarita", "saroj", "satish", "savita", "seema", "shabana",
+    "shahid", "shailendra", "shakti", "shalini", "shankar", "shanti", "shashi", "sheetal",
+    "shikha", "shilpa", "shiv", "shiva", "shivam", "shobha", "shraddha", "shreya", "shyam",
+    "siddharth", "simran", "sita", "sneha", "sohan", "sonali", "sonia", "sonu", "subhash",
+    "sudha", "sudhir", "sujata", "sukhbir", "sukhwinder", "suman", "sumit", "sunil", "sunita",
+    "suraj", "surendra", "suresh", "surya", "sushil", "sushma", "swati", "tanvi", "tara",
+    "tarun", "tejas", "tsering", "tulsi", "uma", "umesh", "usha", "uttam", "vandana",
+    "varsha", "varun", "vasant", "veena", "vidya", "vijay", "vikas", "vikram", "vimal",
+    "vinay", "vineet", "vinod", "vipin", "vishal", "vishnu", "vivek", "yash", "yogesh",
+    "yusuf", "zainab", "zakir", "zorawar", "zubair",
+}
+
+INDIAN_SURNAMES = {
+    "agarwal", "aggarwal", "agrawal", "ahmad", "ahmed", "ali", "ansari", "arora", "awasthi",
+    "babbar", "baghel", "baig", "bajaj", "banerjee", "bano", "bansal", "bhat", "bhatia",
+    "bhatt", "bhattacharya", "bhullar", "bisht", "bose", "chahal", "chakraborty", "chandra",
+    "chatterjee", "chaudhary", "chauhan", "chawla", "chopra", "choudhary", "das", "datta",
+    "dave", "desai", "deshmukh", "devi", "dhawan", "dhillon", "dixit", "dubey", "dutta",
+    "dwivedi", "garg", "gaur", "ghosh", "gill", "goel", "goswami", "goyal", "grewal",
+    "grover", "gupta", "hussain", "iyer", "jadhav", "jain", "jaiswal", "jhaveri", "jha",
+    "joshi", "kadam", "kapoor", "kapur", "kashyap", "kaul", "kaur", "khan", "khanna",
+    "khatoon", "khurana", "kohli", "kulkarni", "kulshrestha", "kumar", "kumari", "lal",
+    "lodhi", "luthra", "mahajan", "mahto", "malhotra", "malik", "mandal", "mani", "mann",
+    "masih", "mathur", "maurya", "mehra", "mehta", "menon", "mishra", "misra", "mittal",
+    "modi", "mohan", "mohanty", "mukherjee", "murmu", "nair", "nambiar", "narayan",
+    "natarajan", "nath", "nayak", "negi", "nigam", "nishad", "oberoi", "ojha", "pal",
+    "panda", "pandey", "pandeya", "pandit", "panwar", "parekh", "parikh", "paswan", "patel",
+    "pathak", "patil", "patnaik", "pawar", "pillai", "pradhan", "prakash", "prasad",
+    "purohit", "qadri", "qureshi", "rai", "raina", "raja", "rajan", "rajput", "ram",
+    "rana", "rao", "rastogi", "rathore", "rawat", "ray", "reddy", "roy", "saha", "sahni",
+    "sahu", "saini", "saxena", "sen", "sengupta", "seth", "sethi", "shah", "sharma",
+    "shastri", "sheikh", "shetty", "shinde", "shukla", "siddiqui", "singh", "singhal",
+    "sinha", "solanki", "soni", "sood", "srivastava", "subramanian", "suri", "swami",
+    "tandon", "thakur", "tiwari", "tripathi", "trivedi", "tyagi", "upadhyay", "varma",
+    "verma", "vohra", "vyas", "wangmo", "yadav", "zaidi",
+}
+
+# Devanagari names (first & last) for unanchored Hindi narrative mentions
+DEVANAGARI_NAMES = {
+    "अजय", "अनीता", "अनिल", "अमित", "अर्जुन", "अशोक", "आशा", "इमरान", "इम्तियाज़", "इरफ़ान",
+    "उषा", "कमल", "कमला", "कविता", "काजल", "किशन", "कुलदीप", "गीता", "गौरव", "गीता",
+    "जगदीश", "जसप्रीत", "जावेद", "ज़ुबैर", "ज़ैनब", "दिनेश", "दीपक", "नाज़", "नरेश",
+    "नसीम", "नीलम", "नेहा", "पंकज", "पार्वती", "पूजा", "प्रकाश", "प्रिया", "फ़रीदा", "फ़ातिमा",
+    "बबीता", "बृजेश", "मनीष", "मनोज", "ममता", "महेश", "मुकेश", "मीना", "मोहम्मद", "मोहन",
+    "यूसुफ़", "रमेश", "रवि", "राजन", "राजेश", "राजू", "राधा", "राम", "राहुल", "रीना",
+    "रुख़साना", "रेखा", "लक्ष्मी", "वंदना", "विजय", "विकास", "विनोद", "विवेक", "शबाना",
+    "शांति", "शाहिद", "शिव", "श्याम", "संदीप", "संजय", "संतोष", "सरिता", "सलमा", "सविता",
+    "सीता", "सुखविंदर", "सुनीता", "सुनील", "सुमन", "सुरेश", "हरप्रीत", "हरीश",
+    # Surnames
+    "अंसारी", "अग्रवाल", "खान", "खातून", "गुप्ता", "चौधरी", "चौहान", "तिवारी", "ठाकुर",
+    "दत्त", "दुबे", "देवी", "निषाद", "पटेल", "पांडे", "पाण्डेय", "पासवान", "प्रसाद",
+    "बानो", "बेग", "बेदी", "भट्टाचार्य", "मिश्र", "मिश्रा", "मलिक", "मसीह", "यादव",
+    "राजपूत", "राठौर", "लोधी", "वर्मा", "शर्मा", "शुक्ला", "श्रीवास्तव", "सिद्दीकी", "सिंह",
+    "कौर", "कुरैशी", "क़ादरी",
+}
+
+# Common non-PII medical/English/Hindi words that must NEVER be treated as patient names
+NON_PII_WORDS = {
+    "addison", "alzheimer", "parkinson", "crohn", "hodgkin", "graves", "bell", "cushing",
+    "hashimoto", "raynaud", "wilson", "hansen", "meniere", "huntington", "marfan", "paget",
+    "patient", "doctor", "nurse", "ward", "bed", "hospital", "clinic", "medical",
+    "medicine", "surgery", "pathology", "diagnostics", "laboratory", "lab", "report",
+    "discharge", "summary", "admission", "prescription", "opd", "ipd", "emergency",
+    "fever", "bukhar", "cough", "pain", "abdomen", "diabetes", "hypertension", "typhoid",
+    "dengue", "malaria", "anaemia", "anemia", "tuberculosis", "asthma", "pneumonia",
+    "jaundice", "uti", "infection", "normal", "stable", "condition", "advice", "review",
+    "chronic", "acute", "severe", "mild", "moderate", "primary", "secondary", "essential",
+    "unspecified", "care", "follow", "tablet", "tab", "cap", "capsule", "inj", "injection", "syrup", "inh",
+    "inhaler", "drops", "paracetamol", "dolo", "metformin", "amlodipine", "telmisartan",
+    "ramipril", "pantoprazole", "ceftriaxone", "doxycycline", "glimepiride", "levothyroxine",
+    "salbutamol", "atorvastatin", "aspirin", "clopidogrel", "azithromycin", "amoxicillin",
+    "insulin", "ferrous", "folic", "acid", "calcium", "vitamin", "oral", "diet", "salt",
+    "low", "high", "blood", "sugar", "glucose", "haemoglobin", "hemoglobin", "creatinine",
+    "sodium", "potassium", "platelet", "count", "wbc", "rbc", "tsh", "hba1c", "bilirubin",
+    "pulse", "temp", "spo2", "weight", "height", "bmi", "bp", "rbs", "fbs", "ppbs",
+    "male", "female", "other", "unknown", "none", "nil", "null", "positive", "negative",
+    "pending", "approved", "rejected", "closed", "open", "active", "finished", "current",
+    "final", "routine", "general", "special", "charitable", "multispeciality", "district",
+    "tehsil", "village", "mohalla", "ward", "house", "makan", "near", "opp", "opposite",
+    "behind", "mandir", "masjid", "temple", "school", "gurudwara", "panchayat", "bhawan",
+    "tanki", "chowk", "bazar", "bazaar", "colony", "nagar", "ganj", "pur", "purwa", "kalan",
+    "khurd", "india", "uttar", "pradesh", "lucknow", "sitapur", "hardoi", "unnao",
+    "barabanki", "sultanpur", "bahraich", "rae", "bareli", "raebareli", "lalganj",
+    "dalmau", "haidergarh", "nawabganj", "purwa", "safipur", "biswan", "misrikh",
+    "lambhua", "kadipur", "malihabad", "nanpara", "bilgram", "mahmudabad",
+    "january", "february", "march", "april", "may", "june", "july", "august",
+    "september", "october", "november", "december", "monday", "tuesday", "wednesday",
+    "thursday", "friday", "saturday", "sunday", "morning", "evening", "night", "today",
+    "yesterday", "tomorrow", "weeks", "week", "days", "day", "months", "month", "years",
+    "year", "yrs", "min", "hrs", "hours", "date", "time", "name", "age", "sex", "gender",
+    "address", "mobile", "phone", "email", "aadhaar", "aadhar", "abha", "uhid", "mrn",
+    "pan", "pin", "zip", "status", "remarks", "notes", "history", "complaints", "diagnosis",
+    "medications", "attendant", "consultant", "referred", "sample", "collected", "reported",
+    "forwarded", "attachment", "oxygen", "route", "given", "continue", "treated",
+    "conservatively", "admitted", "discharged", "stable", "diya", "lena", "hai", "hain",
+    "tha", "the", "thi", "ka", "ki", "ke", "ko", "se", "ne", "mein", "par", "aur", "ho",
+    "gayi", "gaya", "rahe", "karo", "bola", "theek", "raat", "neend", "khana", "kam",
+    "ulti", "band", "din", "koi", "problem", "to", "call", "after", "before", "with",
+    "without", "for", "from", "and", "or", "in", "on", "at", "by", "of", "no", "yes",
+    "sanjeevani", "jeevan", "jyoti", "arogya", "seva", "sadan", "lifeline", "pathkind",
+    "city", "lims", "ehospital", "helpdesk", "surgical", "consent", "referral", "letter",
+    "whatsapp", "nursing", "visitor", "ambulance", "billing", "query", "caesarean",
+    "section", "cataract", "haemodialysis", "appendicectomy", "cholecystectomy",
+    "laparoscopic", "phacoemulsification", "stimulation", "brain", "deep",
+    # Hindi common words
+    "मरीज़", "रोगी", "नाम", "आयु", "वर्ष", "महिला", "पुरुष", "पिता", "पति", "पत्नी",
+    "पुत्र", "पुत्री", "पता", "मकान", "ग्राम", "गाँव", "तहसील", "जिला", "मोबाइल",
+    "तारीख", "दिनांक", "भर्ती", "छुट्टी", "निदान", "बुखार", "पेशाब", "संक्रमण", "दिन",
+    "पर्चा", "सारांश", "डिस्चार्ज", "ओपीडी", "आईपीडी", "पंजीकरण", "दवा", "दवाई",
+    "डॉ", "डॉक्टर", "नर्स", "वार्ड", "बेड", "अस्पताल", "सलाह", "जाँच", "रिपोर्ट",
+}
+
+HONORIFIC_SUFFIXES = {
+    "ji", "sahab", "saheb", "sahib", "didi", "behenji", "bahanji", "bhai", "bhaiya",
+    "bhaiyya", "amma", "chacha", "kaka", "babu", "mausi", "bua", "tau", "nana", "dada",
+    "dadi", "nani", "जी", "साहब", "दीदी", "बहनजी", "भैया", "भाई", "अम्मा", "चाचा", "काका", "बाबू",
+}
+
+TITLE_PREFIXES = {
+    "mr", "mrs", "ms", "miss", "shri", "sri", "smt", "kumari", "km", "md", "mohd",
+    "श्री", "श्रीमती", "कुमारी", "कु.", "सुश्री",
+}
+
+# Medical abbreviations / contexts that look superficially like relation markers or IDs
+DISEASE_EPONYM_SUFFIXES = (
+    "disease", "syndrome", "palsy", "lymphoma", "triad", "sign", "phenomenon",
+    "reflex", "fracture", "tumour", "tumor", "sarcoma", "crisis", "test", "score",
+    "scale", "classification", "criteria", "granulomatosis", "thyroiditis",
+)
+
+HOSPITAL_MARKERS = (
+    "hospital", "clinic", "diagnostics", "pathology", "nursing home", "medical college",
+    "health centre", "health center", "seva sadan", "multispeciality", "charitable",
+    "अस्पताल", "चिकित्सालय",
+)

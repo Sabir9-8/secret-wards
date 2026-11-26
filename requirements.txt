@@ -1,6 +1,3 @@
-# The starter uses only the Python standard library.
-# Add what you need, for example:
-# rapidfuzz
-# jellyfish
-# indic-transliteration
-# cryptography
+# Pure Python standard library (3.10+) — zero external dependencies.
+# Guarantees offline execution, determinism, and zero wheel/compiler issues
+# across macOS (arm64, Python 3.14) and Debian 12 / Linux (aarch64/x86_64).
