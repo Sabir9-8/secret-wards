@@ -33,9 +33,12 @@ from .translit import fold_indic_digits, tokenize_name
 
 
 def peak_rss_mb() -> float:
+    """Return peak RSS (MB) across self and child processes, rounded to 2 decimals."""
     try:
-        r = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-        return round(r / 1024 if sys.platform != "darwin" else r / 1048576, 1)
+        r_self = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        r_child = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
+        r = max(r_self, r_child)
+        return round(r / 1048576 if sys.platform == "darwin" else r / 1024, 2)
     except Exception:  # noqa: BLE001
         return 0.0
 
@@ -802,6 +805,7 @@ def run_pipeline(inp: Path, out: Path, repo_root: Path) -> int:
             f.write(json.dumps(r, ensure_ascii=False, sort_keys=True) + "\n")
 
     n_san = sum(1 for e in final_entries if e["status"] == "sanitized")
+    rss_mb = peak_rss_mb()
     report = {
         "schema": "raksha-report/1",
         "files": final_entries,
@@ -817,7 +821,8 @@ def run_pipeline(inp: Path, out: Path, repo_root: Path) -> int:
             "records_quarantined": 0,
         },
         "timing": {"seconds": round(time.monotonic() - t0, 2)},
-        "resources": {"peak_rss_mb": peak_rss_mb()},
+        "peak_rss_mb": rss_mb,
+        "resources": {"peak_rss_mb": rss_mb},
     }
     (out / "report.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8", newline="\n")
     # Only counts go to stdout: stdout and stderr are scanned for PII.
