@@ -73,7 +73,10 @@ _ADDR_VILLAGE_BEFORE_TEHSIL_RE = re.compile(
 _TEHSIL_ANCHORED_RE = re.compile(
     r"(?i)(?:\bTehsil[ \t]+[A-Za-z]+(?:[ \t]+[A-Za-z]+)?|तहसील[ \t]+[\u0900-\u097f]+)"
 )
-_PIN_LABELED_RE = re.compile(r"((?:PIN|Pin|Zip|[-,])\s*)([1-8]\d{5})(?!\d)")
+_PIN_LABELED_RE = re.compile(
+    r"(?i)((?:PIN(?:\s*Code)?|पिन(?:\s*कोड)?|Zip(?:\s*Code)?|Postal\s*Code)\s*[:：-]?\s*|[-,\\/]\s*)([1-8][\d०-९]{5})(?![\d०-९])"
+)
+_WIN_PATH_RE = re.compile(r"\b[A-Za-z]:\\[^\s\"',;)]+")
 
 # Protected clinical spans (shielded before name/number/PIN scrubbing)
 _DR_LATIN_RE = re.compile(r"\bDr\.?[ \t]+(?:[A-Z][a-zA-Z.'-]+(?:[ \t]+[A-Z][a-zA-Z.'-]+){0,3})")
@@ -229,13 +232,13 @@ def classify_field(key: str) -> str:
         return "pan"
     if any(t in k for t in ("pmjay", "policy", "insurance")):
         return "insurance"
-    if any(t in k for t in ("uhid", "mrn", "patient_ref", "patientid", "patient_id", "reg_no", "regno", "ipd", "adm_no", "aaeedee", "uid")):
+    if any(t in k for t in ("uhid", "mrn", "patient_ref", "patientid", "patient_id", "reg_no", "regno", "ipd", "adm_no", "aaeedee", "uid", "case_id")):
         return "uhid"
     if any(t in k for t in ("phone", "mobile", "mob", "callback", "telephone", "tel", "contact")):
         return "phone"
     if "email" in k or "e_mail" in k:
         return "email"
-    if any(t in k for t in ("relative", "guardian", "father", "husband", "spouse", "next_of_kin", "raised_by")) or bool(toks & {"pita", "pati"}):
+    if any(t in k for t in ("relative", "guardian", "caregiver", "attendant", "father", "husband", "spouse", "next_of_kin", "raised_by")) or bool(toks & {"pita", "pati"}):
         return "relative_name"
     if k in {"relation", "relationship"}:
         return "relation"
@@ -768,6 +771,9 @@ class GlobalScrubber:
         s = _sub(_PHONE_MASKED_RE, "[PHONE]", s)
         s = _sub(_PHONE_LABELED_RE, r"\1[PHONE]", s)
 
+        # 1b. Windows export paths (e.g., D:\Exports\Place\410401\out.json)
+        s = _sub(_WIN_PATH_RE, "[SOURCE_PATH]", s)
+
         # 2. Addresses, houses, localities, landmarks, villages, PINs
         s = _sub(_HOUSE_RE, "[HOUSE]", s)
         s = _sub(_MOHALLA_RE, "[LOCALITY]", s)
@@ -777,7 +783,7 @@ class GlobalScrubber:
         s = _ADDR_VILLAGE_BEFORE_TEHSIL_RE.sub(lambda m: f"{m.group(1)}[VILLAGE]" if not is_clean_non_pii_word(m.group(2)) else m.group(0), s)
         s = _sub(_TEHSIL_ANCHORED_RE, "[TEHSIL]", s)
         s = _PIN_LABELED_RE.sub(
-            lambda m: m.group(1) + ("******" if suppress_location else generalize_pin(m.group(2), 3)),
+            lambda m: m.group(1) + ("******" if suppress_location else generalize_pin(fold_indic_digits(m.group(2)), 3)),
             s,
         )
 
