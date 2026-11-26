@@ -179,7 +179,11 @@ def _extract_dict_clues(
             clues.pin = sv
         elif k.lower() in {"code", "icd"} and isinstance(v, str) and len(sv) <= 8:
             clues.diagnoses.add(sv.upper())
-        elif role == "free_text":
+        elif role == "date":
+            d_ev, _ = parse_date_str(sv, month_first=month_first)
+            if d_ev:
+                clues.event_dates.add(d_ev)
+        elif role == "free_text" or (role == "other" and len(sv) >= 10 and (" " in sv or any(ch.isdigit() for ch in sv))):
             extract_clues_from_text(sv, clues, month_first=month_first)
             all_names.extend(extract_names_from_text(sv))
 
@@ -259,10 +263,26 @@ def _extract_fhir_clues(bundle: dict[str, Any], clues: ClueSet, all_names: list[
                 val = str(ident.get("value") or "").strip()
                 if val:
                     clues.uhids.add(val.upper())
+            period = res.get("period") if isinstance(res.get("period"), dict) else {}
+            for pk in ("start", "end"):
+                if pk in period:
+                    d_ev, _ = parse_date_str(str(period[pk]))
+                    if d_ev:
+                        clues.event_dates.add(d_ev)
         elif rt == "Condition":
             for cod in (res.get("code") or {}).get("coding") or []:
                 if cod.get("code"):
                     clues.diagnoses.add(str(cod["code"]).upper())
+            if res.get("recordedDate"):
+                d_ev, _ = parse_date_str(str(res["recordedDate"]))
+                if d_ev:
+                    clues.event_dates.add(d_ev)
+        elif rt in ("Observation", "MedicationRequest", "Procedure"):
+            for df in ("effectiveDateTime", "authoredOn", "performedDateTime"):
+                if res.get(df):
+                    d_ev, _ = parse_date_str(str(res[df]))
+                    if d_ev:
+                        clues.event_dates.add(d_ev)
 
 
 def _is_multi_record_json(data: Any) -> bool:
@@ -271,6 +291,20 @@ def _is_multi_record_json(data: Any) -> bool:
         and data.get("resourceType") != "Bundle"
         and any(isinstance(v, list) and v and all(isinstance(x, dict) for x in v) for v in data.values())
     )
+
+
+_DIRECT_ROLE_PLACEHOLDERS: dict[str, tuple[str, str]] = {
+    "aadhaar": ("[AADHAAR]", "AADHAAR"),
+    "abha": ("[ABHA_NUMBER]", "ABHA_NUMBER"),
+    "abha_address": ("[ABHA_ADDRESS]", "ABHA_ADDRESS"),
+    "pan": ("[PAN]", "PAN"),
+    "insurance": ("[INSURANCE_ID]", "INSURANCE_ID"),
+    "phone": ("[PHONE]", "PHONE"),
+    "email": ("[EMAIL]", "EMAIL"),
+    "relative_name": ("[RELATIVE_NAME]", "RELATIVE_NAME"),
+    "source_path": ("[SOURCE_PATH]", "SOURCE_PATH"),
+    "address": ("[ADDRESS]", "ADDRESS"),
+}
 
 
 def _scrub_field_value(
@@ -306,66 +340,50 @@ def _scrub_field_value(
 
     if role == "uhid":
         scrubber.stats.identifiers += 1
+        scrubber.stats.bump("MRN")
         return clues.pseudonym if clues.pseudonym else "[MRN]"
-    if role == "aadhaar":
+    if role in _DIRECT_ROLE_PLACEHOLDERS:
+        placeholder, etype = _DIRECT_ROLE_PLACEHOLDERS[role]
         scrubber.stats.identifiers += 1
-        return "[AADHAAR]"
-    if role == "abha":
-        scrubber.stats.identifiers += 1
-        return "[ABHA_NUMBER]"
-    if role == "abha_address":
-        scrubber.stats.identifiers += 1
-        return "[ABHA_ADDRESS]"
-    if role == "pan":
-        scrubber.stats.identifiers += 1
-        return "[PAN]"
-    if role == "insurance":
-        scrubber.stats.identifiers += 1
-        return "[INSURANCE_ID]"
-    if role == "phone":
-        scrubber.stats.identifiers += 1
-        return "[PHONE]"
-    if role == "email":
-        scrubber.stats.identifiers += 1
-        return "[EMAIL]"
+        scrubber.stats.bump(etype)
+        return placeholder
     if role in ("patient_name", "first_name", "last_name") or (
         role == "ambiguous_name" and parent_key.lower() in {"patient", "raised_by", "name"}
     ):
         scrubber.stats.identifiers += 1
+        scrubber.stats.bump("PATIENT_NAME")
         if clues.pseudonym and not clues.uhids:
             return clues.pseudonym
         return "[PATIENT_NAME]"
-    if role == "relative_name":
-        scrubber.stats.identifiers += 1
-        return "[RELATIVE_NAME]"
-    if role == "source_path":
-        scrubber.stats.identifiers += 1
-        return "[SOURCE_PATH]"
-    if role == "address":
-        scrubber.stats.identifiers += 1
-        return "[ADDRESS]"
     if role == "village":
         scrubber.stats.generalized += 1
+        scrubber.stats.bump("VILLAGE")
         return "[VILLAGE]"
     if role == "tehsil":
         scrubber.stats.generalized += 1
+        scrubber.stats.bump("TEHSIL")
         return "[TEHSIL]"
     if role == "district":
         if clues.suppress_district:
             scrubber.stats.suppressed += 1
+            scrubber.stats.bump("DISTRICT")
             return "[DISTRICT]"
         return val
     if role == "pin":
         scrubber.stats.generalized += 1
+        scrubber.stats.bump("PIN")
         return "******" if clues.suppress_district else generalize_pin(sv, 3)
     if role == "dob":
         if clues.suppress_district:
             scrubber.stats.suppressed += 1
+            scrubber.stats.bump("DOB")
             return "[DOB]"
         d, fmt = parse_date_str(sv, month_first=month_first)
         if d and fmt:
             scrubber.stats.generalized += 1
+            scrubber.stats.bump("DOB")
             return format_date_like(d + dt.timedelta(days=clues.date_shift), fmt, sv)
+        scrubber.stats.bump("DOB")
         return "[DOB]"
     if role == "age":
         scrubber.stats.generalized += 1
@@ -391,6 +409,32 @@ def _scrub_field_value(
         age_width=clues.age_width,
         suppress_location=clues.suppress_district,
     )
+
+
+def _scrub_fhir_resource_narratives(
+    res: dict[str, Any],
+    scrubber: GlobalScrubber,
+    clues: ClueSet,
+    shift: int,
+    *,
+    is_patient: bool = False,
+) -> None:
+    """Scrub narrative text.div, note[].text, and extension[].valueString on any FHIR resource."""
+    scrub_kw = {"shift_days": shift, "age_width": clues.age_width, "suppress_location": clues.suppress_district}
+    if isinstance(res.get("text"), dict) and isinstance(res["text"].get("div"), str):
+        res["text"]["div"] = scrubber.scrub_text(res["text"]["div"], **scrub_kw)
+    for note in res.get("note") or []:
+        if isinstance(note, dict) and isinstance(note.get("text"), str):
+            note["text"] = scrubber.scrub_text(note["text"], **scrub_kw)
+    for ext in res.get("extension") or []:
+        if isinstance(ext, dict) and isinstance(ext.get("valueString"), str):
+            if is_patient and any(t in str(ext.get("url", "")).lower() for t in ("mother", "father", "relative", "spouse", "name")):
+                ext["valueString"] = "[RELATIVE_NAME]"
+                scrubber.stats.identifiers += 1
+                scrubber.stats.bump("RELATIVE_NAME")
+            else:
+                ext["valueString"] = scrubber.scrub_text(ext["valueString"], **scrub_kw)
+                scrubber.stats.identifiers += 1
 
 
 def _scrub_fhir_bundle(bundle: dict[str, Any], scrubber: GlobalScrubber, clues: ClueSet) -> dict[str, Any]:
@@ -419,22 +463,21 @@ def _scrub_fhir_bundle(bundle: dict[str, Any], scrubber: GlobalScrubber, clues: 
             continue
         rt = res.get("resourceType")
         if rt == "Patient":
-            if isinstance(res.get("text"), dict) and "div" in res["text"]:
-                res["text"]["div"] = scrubber.scrub_text(
-                    str(res["text"]["div"]),
-                    shift_days=shift,
-                    age_width=clues.age_width,
-                    suppress_location=clues.suppress_district,
-                )
+            _scrub_fhir_resource_narratives(res, scrubber, clues, shift, is_patient=True)
             for ident in res.get("identifier") or []:
                 if isinstance(ident, dict) and "value" in ident:
                     scrubber.stats.identifiers += 1
+                    scrubber.stats.bump("MRN")
                     ident["value"] = pid_label
             if res.get("name"):
                 scrubber.stats.identifiers += 1
+                scrubber.stats.bump("PATIENT_NAME")
                 res["name"] = [{"text": pid_label}]
             if res.get("telecom"):
-                scrubber.stats.identifiers += len(res["telecom"])
+                n_tel = len(res["telecom"])
+                scrubber.stats.identifiers += n_tel
+                for t in res["telecom"]:
+                    scrubber.stats.bump("EMAIL" if t.get("system") == "email" else "PHONE")
                 res["telecom"] = [{"system": t.get("system", "phone"), "value": "[PHONE]" if t.get("system") != "email" else "[EMAIL]"} for t in res["telecom"]]
             if res.get("birthDate"):
                 if clues.suppress_district:
@@ -442,6 +485,7 @@ def _scrub_fhir_bundle(bundle: dict[str, Any], scrubber: GlobalScrubber, clues: 
                 else:
                     res["birthDate"] = _shift_iso(str(res["birthDate"]))
                 scrubber.stats.generalized += 1
+                scrubber.stats.bump("DOB")
             if res.get("address"):
                 new_addrs = []
                 for addr in res["address"]:
@@ -459,29 +503,32 @@ def _scrub_fhir_bundle(bundle: dict[str, Any], scrubber: GlobalScrubber, clues: 
                     new_addrs.append(na)
                 res["address"] = new_addrs
                 scrubber.stats.generalized += 1
+                scrubber.stats.bump("ADDRESS")
             if res.get("contact"):
                 for cont in res["contact"]:
                     if isinstance(cont, dict) and isinstance(cont.get("name"), dict):
                         cont["name"]["text"] = "[RELATIVE_NAME]"
                         scrubber.stats.identifiers += 1
-            if res.get("extension"):
-                for ext in res["extension"]:
-                    if isinstance(ext, dict) and isinstance(ext.get("valueString"), str):
-                        if any(t in str(ext.get("url", "")).lower() for t in ("mother", "father", "relative", "spouse", "name")):
-                            ext["valueString"] = "[RELATIVE_NAME]"
-                        else:
-                            ext["valueString"] = scrubber.scrub_text(ext["valueString"], shift_days=shift)
-                        scrubber.stats.identifiers += 1
-        elif rt == "Composition":
+                        scrubber.stats.bump("RELATIVE_NAME")
+            continue
+
+        _scrub_fhir_resource_narratives(res, scrubber, clues, shift)
+        if rt == "Composition":
             if isinstance(res.get("subject"), dict) and "display" in res["subject"]:
                 res["subject"]["display"] = pid_label
             if "date" in res:
                 res["date"] = _shift_iso(str(res["date"]))
+            for sec in res.get("section") or []:
+                if isinstance(sec, dict) and isinstance(sec.get("text"), dict) and isinstance(sec["text"].get("div"), str):
+                    sec["text"]["div"] = scrubber.scrub_text(
+                        sec["text"]["div"], shift_days=shift, age_width=clues.age_width, suppress_location=clues.suppress_district
+                    )
         elif rt == "Encounter":
             for ident in res.get("identifier") or []:
                 if isinstance(ident, dict) and "value" in ident:
                     ident["value"] = pid_label
                     scrubber.stats.identifiers += 1
+                    scrubber.stats.bump("MRN")
             if isinstance(res.get("period"), dict):
                 for pk in ("start", "end"):
                     if pk in res["period"]:
@@ -553,6 +600,60 @@ def _scrub_deep_json_iterative(root: Any, scrubber: GlobalScrubber, clues: ClueS
                 else:
                     new_l[idx] = _scrub_field_value(pkey, v, scrubber, clues, month_first, parent_key=pkey)
     return top_container[0]
+
+
+def _ensure_csv_row_pseudonym(new_row: list[str], header_roles: list[str], pid: str | None) -> None:
+    """Guarantee that a linked CSV row embeds its pseudonym while preserving column schema."""
+    if not pid or not new_row or any(pid in cell for cell in new_row):
+        return
+    target = next((j for j, r in enumerate(header_roles) if r == "free_text" and j < len(new_row)), None)
+    if target is None:
+        target = next((j for j in range(len(new_row) - 1, -1, -1) if new_row[j].strip()), 0)
+    cell = new_row[target]
+    for marker in ("[MRN]", "[PATIENT_NAME]", "[PHONE]"):
+        if marker in cell:
+            new_row[target] = cell.replace(marker, pid, 1)
+            return
+    new_row[target] = f"Patient: {pid}; {cell}" if cell.strip() else pid
+
+
+def _inject_pseudonym_in_json(root: Any, pid: str | None) -> None:
+    """Iteratively embed `pid` inside a scrubbed JSON tree (safe for 1,500+ depth)."""
+    if not pid or not isinstance(root, (dict, list)):
+        return
+    first_slot_by_marker: dict[str, tuple[Any, Any, str]] = {}
+    stack: list[Any] = [root]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, dict):
+            items = list(node.items())
+            for k, v in reversed(items):
+                if isinstance(v, str):
+                    if pid in v:
+                        return
+                    for marker in ("[MRN]", "[PATIENT_NAME]", "[PHONE]"):
+                        if marker in v and marker not in first_slot_by_marker:
+                            first_slot_by_marker[marker] = (node, k, v)
+                elif isinstance(v, (dict, list)):
+                    stack.append(v)
+        elif isinstance(node, list):
+            for idx in range(len(node) - 1, -1, -1):
+                v = node[idx]
+                if isinstance(v, str):
+                    if pid in v:
+                        return
+                    for marker in ("[MRN]", "[PATIENT_NAME]", "[PHONE]"):
+                        if marker in v and marker not in first_slot_by_marker:
+                            first_slot_by_marker[marker] = (node, idx, v)
+                elif isinstance(v, (dict, list)):
+                    stack.append(v)
+    for marker in ("[MRN]", "[PATIENT_NAME]", "[PHONE]"):
+        if marker in first_slot_by_marker:
+            container, key_or_idx, val = first_slot_by_marker[marker]
+            container[key_or_idx] = val.replace(marker, pid, 1)
+            return
+    if isinstance(root, dict) and "patient_ref" not in root:
+        root["patient_ref"] = pid
 
 
 def run_pipeline(inp: Path, out: Path, repo_root: Path) -> int:
@@ -719,6 +820,7 @@ def run_pipeline(inp: Path, out: Path, repo_root: Path) -> int:
                         else:
                             val = _scrub_field_value(h_name, cell, scrubber, c, mf)
                             new_row.append(str(val) if val is not None else "")
+                    _ensure_csv_row_pseudonym(new_row, header_roles, pid)
                     w.writerow(new_row)
                     records_out.append({"file": f"sanitized/{out_rel}", "loc": loc, "patient": pid})
                     stats.records += 1
@@ -745,6 +847,7 @@ def run_pipeline(inp: Path, out: Path, repo_root: Path) -> int:
                                 loc = f"/{ptr_k}/{i}"
                                 c = all_clues[record_clue_map[(pf.rel, loc)]]
                                 cleaned_rec = _scrub_deep_json_iterative(rec, scrubber, c, mf)
+                                _inject_pseudonym_in_json(cleaned_rec, c.pseudonym)
                                 cleaned_list.append(cleaned_rec)
                                 records_out.append({"file": f"sanitized/{out_rel}", "loc": loc, "patient": c.pseudonym})
                                 stats.records += 1
@@ -757,6 +860,7 @@ def run_pipeline(inp: Path, out: Path, repo_root: Path) -> int:
                 else:
                     c = all_clues[record_clue_map[(pf.rel, "doc")]]
                     cleaned_obj = _scrub_deep_json_iterative(pf.json_data, scrubber, c, mf)
+                    _inject_pseudonym_in_json(cleaned_obj, c.pseudonym)
                     result_text = json.dumps(cleaned_obj, ensure_ascii=False, indent=2) + "\n"
                     records_out.append({"file": f"sanitized/{out_rel}", "loc": "doc", "patient": c.pseudonym})
                     stats.records += 1
@@ -820,6 +924,7 @@ def run_pipeline(inp: Path, out: Path, repo_root: Path) -> int:
             "records_suppressed": stats.suppressed,
             "records_quarantined": 0,
         },
+        "entities": dict(sorted(stats.entities.items())),
         "timing": {"seconds": round(time.monotonic() - t0, 2)},
         "peak_rss_mb": rss_mb,
         "resources": {"peak_rss_mb": rss_mb},

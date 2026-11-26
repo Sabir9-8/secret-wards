@@ -29,6 +29,7 @@ class Cluster:
     villages: set[str] = field(default_factory=set)
     districts: set[str] = field(default_factory=set)
     diagnoses: set[str] = field(default_factory=set)
+    event_dates: set[dt.date] = field(default_factory=set)
 
     def add_clues(self, idx: int, c: ClueSet) -> None:
         self.members.append(idx)
@@ -54,6 +55,7 @@ class Cluster:
         if c.district:
             self.districts.add(c.district)
         self.diagnoses |= c.diagnoses
+        self.event_dates |= c.event_dates
 
     def merge_from(self, other: Cluster) -> None:
         self.members.extend(other.members)
@@ -76,6 +78,7 @@ class Cluster:
         self.villages |= other.villages
         self.districts |= other.districts
         self.diagnoses |= other.diagnoses
+        self.event_dates |= other.event_dates
 
 
 def _best_name_sim(names_a: list[list[str]], names_b: list[list[str]]) -> float:
@@ -110,6 +113,19 @@ def are_compatible(a: Cluster, b: Cluster) -> bool:
     if a.relatives and b.relatives and _best_name_sim(a.relatives, b.relatives) < 0.72:
         return False
     return True
+
+
+def _avoid_dob_collision(shift: int, dobs: set[dt.date], event_dates: set[dt.date]) -> int:
+    """Nudge a shift deterministically if a clinical/visit date would land on the patient's true DOB."""
+    if not dobs or not event_dates:
+        return shift
+    for delta in (0, 1, -1, 2, -2, 3, -3, 4, -4):
+        cand = shift + delta
+        if cand == 0:
+            continue
+        if all((ev + dt.timedelta(days=cand)) not in dobs for ev in event_dates):
+            return cand
+    return shift
 
 
 def _has_strong_evidence(c: ClueSet) -> bool:
@@ -293,7 +309,11 @@ def link_and_protect(
         member_locs = sorted(f"{clues_list[m].file_rel}#{clues_list[m].loc}" for m in cl.members)
         patient_key = f"PT|{anchor_parts[0]}|{member_locs[0]}"
         pid = pseudonym(patient_key)
-        shift = date_shift_days(patient_key, max_days=date_shift_max_days)
+        shift = _avoid_dob_collision(
+            date_shift_days(patient_key, max_days=date_shift_max_days),
+            cl.dobs,
+            cl.event_dates,
+        )
 
         # K-anonymity / re-identification risk check
         rep_age = sorted(cl.ages)[len(cl.ages) // 2] if cl.ages else None
@@ -328,4 +348,5 @@ def link_and_protect(
     for c in clues_list:
         if c.patient_key is None:
             rec_key = f"REC|{c.file_rel}|{c.loc}"
-            c.date_shift = date_shift_days(rec_key, max_days=date_shift_max_days)
+            raw_shift = date_shift_days(rec_key, max_days=date_shift_max_days)
+            c.date_shift = _avoid_dob_collision(raw_shift, {c.dob} if c.dob else set(), c.event_dates)
