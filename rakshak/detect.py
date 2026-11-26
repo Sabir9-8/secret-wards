@@ -5,6 +5,7 @@ import base64
 import binascii
 import datetime as dt
 import re
+import urllib.parse
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -22,7 +23,8 @@ from .policy import age_band, date_shift_days, generalize_pin, hmac_token
 from .translit import devanagari_to_latin, fold_indic_digits, has_devanagari, normalize_text, phonetic_key, tokenize_name
 
 # --------------------------------------------------------------------------- Patterns
-_EMAIL_RE = re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.-]+\b")
+_EMAIL_RE = re.compile(r"(?<![A-Za-z0-9_.+-])[A-Za-z0-9_.+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+(?![A-Za-z0-9_.+-])")
+_URL_PCT_RE = re.compile(r"%[0-9A-Fa-f]{2}")
 _ABHA_ADDR_RE = re.compile(r"\b[\w.+-]+@(?:abdm|ndhm|sbx)\b", re.I)
 _ABHA_NUM_RE = re.compile(r"(?<![-\d०-९])[\d०-९]{2}[-\s]?[\d०-९]{4}[-\s]?[\d०-९]{4}[-\s]?[\d०-९]{4}(?![-\d०-९])")
 _AADHAAR_RE = re.compile(r"(?<![-\d०-९])[\d०-९]{4}[-\s]?[\d०-९]{4}[-\s]?[\d०-९]{4}(?![-\d०-९])")
@@ -213,7 +215,7 @@ def classify_field(key: str) -> str:
 
     if k in {"doctor", "ref_doctor", "referred_by", "consultant", "physician", "practitioner"}:
         return "doctor"
-    if k in {"source_path", "filepath", "file_path", "export_path"}:
+    if k in {"source_path", "filepath", "file_path", "export_path", "export_origin"}:
         return "source_path"
     if k in {"remarks", "notes", "note", "comment", "comments", "description", "div", "narrative", "tippanee", "tippani", "handover"} or "summary" in k:
         return "free_text"
@@ -557,19 +559,36 @@ def filename_has_pii(rel: str, known_name_tokens: set[str]) -> bool:
 
 
 def sanitize_filename(rel: str, known_name_tokens: set[str], used_paths: set[str]) -> str:
-    """Return original relative path if clean, or a deterministic HMAC-renamed path if PII is present."""
-    if not filename_has_pii(rel, known_name_tokens):
-        used_paths.add(rel)
-        return rel
-    parts = rel.rsplit("/", 1)
-    parent = parts[0] + "/" if len(parts) == 2 else ""
-    fname = parts[-1]
-    ext = "." + fname.rsplit(".", 1)[1] if "." in fname else ""
-    tok = hmac_token("fname", rel, length=8)
-    candidate = f"{parent}file_{tok}{ext}"
+    """Return original relative path if clean, or deterministically rename any PII-bearing dir/file segments."""
+    segments = rel.split("/")
+    new_segments: list[str] = []
+    changed = False
+    for idx_seg, seg in enumerate(segments):
+        is_last = idx_seg == len(segments) - 1
+        if filename_has_pii(seg, known_name_tokens):
+            changed = True
+            if is_last:
+                ext = "." + seg.rsplit(".", 1)[1] if "." in seg else ""
+                tok = hmac_token("fname", rel, length=8)
+                new_segments.append(f"file_{tok}{ext}")
+            else:
+                tok = hmac_token("dname", "/".join(segments[: idx_seg + 1]), length=8)
+                new_segments.append(f"dir_{tok}")
+        else:
+            new_segments.append(seg)
+
+    candidate = "/".join(new_segments)
+    if not changed:
+        used_paths.add(candidate)
+        return candidate
     idx = 1
+    base_cand = candidate
     while candidate in used_paths:
-        candidate = f"{parent}file_{tok}_{idx}{ext}"
+        if "." in base_cand.rsplit("/", 1)[-1]:
+            stem, ext = base_cand.rsplit(".", 1)
+            candidate = f"{stem}_{idx}.{ext}"
+        else:
+            candidate = f"{base_cand}_{idx}"
         idx += 1
     used_paths.add(candidate)
     return candidate
@@ -619,13 +638,13 @@ class GlobalScrubber:
         if uniq_full:
             escaped = [re.escape(x) for x in uniq_full if len(x) >= 3]
             if escaped:
-                # Word-boundary for ASCII edges
+                # Alphanumeric-boundary matching (handles underscores in keys/paths too)
                 parts = []
                 for esc, raw in zip(escaped, uniq_full):
                     if raw[0].isascii() and raw[0].isalnum():
-                        esc = r"\b" + esc
+                        esc = r"(?<![A-Za-z0-9])" + esc
                     if raw[-1].isascii() and raw[-1].isalnum():
-                        esc = esc + r"\b"
+                        esc = esc + r"(?![A-Za-z0-9])"
                     parts.append(esc)
                 self._compiled_full_rx = re.compile("|".join(parts), re.I)
 
@@ -638,7 +657,7 @@ class GlobalScrubber:
             for t in toks:
                 esc = re.escape(t)
                 if t.isascii():
-                    esc = r"\b" + esc + r"\b"
+                    esc = r"(?<![A-Za-z0-9])" + esc + r"(?![A-Za-z0-9])"
                 parts.append(esc)
             self._compiled_token_rx = re.compile("|".join(parts), re.I)
 
@@ -721,7 +740,13 @@ class GlobalScrubber:
         if _B64_RE.fullmatch(text.strip()):
             return self.scrub_b64_if_present(text)
 
-        s = _decode_unicode_escapes(text)
+        # Decode URL-encoded (%XX) payloads when present (e.g., %40 email or %20/%3A text)
+        if "%" in text and (len(_URL_PCT_RE.findall(text)) >= 2 or "%40" in text):
+            unquoted = urllib.parse.unquote(text)
+            if unquoted != text and sum(1 for c in unquoted if c.isprintable() or c in "\r\n\t") / max(1, len(unquoted)) >= 0.9:
+                text = unquoted
+
+        s = normalize_text(_decode_unicode_escapes(text))
         s, shields = self._shield_clinical(s)
 
         def _sub(rx: re.Pattern[str], repl: Any, txt: str) -> str:
