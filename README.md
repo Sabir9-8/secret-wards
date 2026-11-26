@@ -45,13 +45,14 @@ Deterministic 2-Tier Record Linkage & K-Anonymity Risk Sizing
    │  • Tier 1: Direct IDs (UHID, Aadhaar, ABHA, PAN, insurance, email, phone) + conflict guards
    │  • Tier 2: Ambiguity-guarded cross-script Name + secondary clue (DOB/relative/village+age)
    │  • Group-size analysis (min_group_size: 5) for age-band widening & rare-cell suppression
-   ▼  [Pass 3: rakshak/detect.py + policy.py + pipeline.py]
+   ▼  [Pass 3: rakshak/detect.py + ml_scorer.py + policy.py + pipeline.py]
 Clinical-Trap-Safe Scrubbing & Compliant UTF-8 Export
-   │  • Shield doctors, C/O complaints, K/C/O, H/O, doses, labs, eponyms before PII redaction
-   │  • Scrub hidden channels: filenames, CSV headers, JSON keys, metadata, base64, FHIR extensions
-   │  • Inject HMAC PSN-XXXXXX inside records; shift dates; generalize age bands & 3-digit PINs
+   │  • Shield doctors, C/O & सी/ओ complaints, K/C/O, H/O, doses, labs, accented eponyms
+   │  • Score ambiguous multi-word spans conservatively via pure-stdlib L2 logistic disambiguator
+   │  • Scrub hidden channels: filenames, headers, JSON keys, base64/%XX/\uXXXX, FHIR narratives
+   │  • Enforce in-record PSN-XXXXXX consistency; shift dates (DOB-safe), age bands & 3-digit PINs
    ▼
-Output: sanitized/ (UTF-8, \n) + records.jsonl + report.json (counts, SHA-256, timing, RSS)
+Output: sanitized/ (UTF-8, \n) + records.jsonl + report.json (counts, entities, SHA-256, timing, RSS)
 ```
 
 ### Module Breakdown (`rakshak/`)
@@ -61,10 +62,13 @@ Output: sanitized/ (UTF-8, \n) + records.jsonl + report.json (counts, SHA-256, t
 | [`policy.py`](rakshak/policy.py) | Parses `config/policy.yaml` without PyYAML; implements keyed HMAC-SHA256 `pseudonym()` (`PSN-XXXXXX` in Crockford base32), `hmac_token()`, non-zero `date_shift_days()`, truthful `age_band()`, and `generalize_pin()`. |
 | [`translit.py`](rakshak/translit.py) | NFKC normalization, zero-width stripping, Cyrillic/Greek homoglyph folding, Devanagari digit folding (`०-९` → `0-9`), rule-based Devanagari→Latin transliteration, Hinglish phonetic keys, and pure-Python Jaro-Winkler similarity. |
 | [`gazetteer.py`](rakshak/gazetteer.py) | General Indian given/surname sets (Latin and Devanagari), honorifics (`ji`, `sahab`, `didi`, `behenji`, `श्री`, etc.), title prefixes, disease eponym suffixes, and clinical non-PII allowlists. |
+| [`ml_features.py`](rakshak/ml_features.py) | Pure-stdlib (`re`, `unicodedata`, `math`) feature extractor producing normalized word-boundary character n-grams (`2..4`) and lightweight left/right structural context cues. |
+| [`ml_scorer.py`](rakshak/ml_scorer.py) | Pure-stdlib sparse logistic regression scorer loading [`rakshak/models/disambiguator.json`](rakshak/models/disambiguator.json) offline with safe fallback when absent. |
 | [`ingest.py`](rakshak/ingest.py) | Decodes UTF-8-BOM, UTF-16, UTF-8, and strict `cp1252`; quarantines unsupported extensions, empty files, malformed/deeply recursive errors, corrupt UTF-8/mid-stream BOMs, and mislabeled JSON/XML behind `.csv`/`.tsv`. |
-| [`detect.py`](rakshak/detect.py) | Token-level semantic field classifier (`classify_field`), clinical trap shielding (`_shield_clinical`), multilingual direct/indirect PII regexes, `\uXXXX` & base64 payload scrubbing, filename PII detection, and Pass-2 dataset-wide name lexicon sweep. |
-| [`linker.py`](rakshak/linker.py) | Homonym-safe 2-tier clustering with strict conflict checks (`are_compatible`) and ambiguity abstention (`patient: null`), plus k-anonymity widening/suppression (`link_and_protect`). |
-| [`pipeline.py`](rakshak/pipeline.py) | Orchestrates multi-pass extraction, FHIR R4 Bundle sanitization (preserving resolvable `urn:uuid:` references and clinical resources), iterative arbitrary-depth JSON scrubbing, pseudonym injection inside exported records, and `records.jsonl` / `report.json` generation. |
+| [`detect.py`](rakshak/detect.py) | Token-level semantic field classifier (`classify_field`), clinical trap shielding (`_shield_clinical`), multilingual direct/indirect PII regexes, conservative ML disambiguation (`_ml_sweep`, `_should_preserve_clinical_rel`), `\uXXXX` & base64 payload scrubbing, filename PII detection, and Pass-2 dataset-wide name lexicon sweep. |
+| [`linker.py`](rakshak/linker.py) | Homonym-safe 2-tier clustering with strict conflict checks (`are_compatible`), ambiguity abstention (`patient: null`), within-record DOB collision guard (`_avoid_dob_collision`), and k-anonymity widening/suppression (`link_and_protect`). |
+| [`pipeline.py`](rakshak/pipeline.py) | Orchestrates multi-pass extraction, FHIR R4 Bundle sanitization (including `Patient`, `Composition`, `Condition`, `Observation`, `DocumentReference`, and resolvable `urn:uuid:` references), iterative arbitrary-depth JSON scrubbing & pseudonym injection, `PSN-*` consistency in exported records, and `records.jsonl` / `report.json` (`counts`, `entities`, `timing`, `peak_rss_mb`) generation. |
+| [`scripts/train_disambiguator.py`](scripts/train_disambiguator.py) | Offline trainer generating ~4,000 synthetic spans (`seed=42`, zero dev/input usage) to train and export the sparse L2-regularized Logistic Regression model. |
 
 ### How the Six Challenge Traps Are Handled
 
@@ -79,9 +83,10 @@ Output: sanitized/ (UTF-8, \n) + records.jsonl + report.json (counts, SHA-256, t
 
 ## 3. Declared Models, Libraries & Offline Compliance
 
-- **LLMs / Generative Models / Pretrained Transformers:** **None.** Zero hosted APIs, zero local LLMs, and zero models >50M parameters.
+- **LLMs / Generative Models / Pretrained Transformers:** **None.** Zero hosted APIs, zero local LLMs, and zero pretrained transformers or models >50M parameters.
+- **Self-Trained Classical ML Model (Declared):** A compact, offline, pure-Python L2-regularized Logistic Regression span disambiguator stored at [`rakshak/models/disambiguator.json`](rakshak/models/disambiguator.json) (~102 KB; `version: "1.0"`, `3,500` TF-IDF character n-gram + structural weights, bias `-2.0688`, conservative decision gate `>= max(threshold, 0.75)`). Trained exclusively on ~4,000 synthetic Indian/Devanagari/Hinglish and clinical examples generated by [`scripts/train_disambiguator.py`](scripts/train_disambiguator.py) (`seed=42`, zero `dev/input` records used). Invoked conservatively in [`rakshak/detect.py`](rakshak/detect.py) via [`rakshak/ml_scorer.py`](rakshak/ml_scorer.py) only for ambiguous unanchored multi-word spans or `C/O` / `सी/ओ` / `w/o` disambiguation after deterministic rules and clinical shields.
 - **Third-Party Libraries:** **None.** [`requirements.txt`](requirements.txt) uses only the Python 3.10+ standard library, ensuring zero network calls during `run`, deterministic byte-identical output across macOS (`arm64`) and Linux (`aarch64`/`x86_64`), and no wheel/compiler dependencies.
-- **Algorithmic Techniques:** Deterministic regular expressions, Unicode normalization, rule-based transliteration, phonetic hashing, Jaro-Winkler string similarity, curated Indian name/clinical word lists, and HMAC-SHA256.
+- **Algorithmic Techniques:** Deterministic regular expressions, Unicode normalization, rule-based transliteration, phonetic hashing, Jaro-Winkler string similarity, curated Indian name/clinical word lists, pure-stdlib L2-regularized Logistic Regression disambiguation, and HMAC-SHA256.
 
 ---
 
@@ -90,21 +95,23 @@ Output: sanitized/ (UTF-8, \n) + records.jsonl + report.json (counts, SHA-256, t
 - **Secret & Side-Channel Hygiene:** `RAKSHA_SECRET` is read solely from the environment and used only inside HMAC-SHA256 digests (`PSN-XXXXXX` and per-patient shifts). Only aggregate file/record counts are printed to `stdout`; `report.json`, `records.jsonl`, and filenames never emit PII or the secret. No temp files are written to `TMPDIR` or `HOME`, and `--input` is never modified.
 - **Fail-Safe Quarantine:** Any file that cannot be decoded cleanly or parsed into its declared format is quarantined and excluded from `sanitized/` and `records.jsonl`.
 
-Measured on `Secret-Wards-ToolKit/dev/input` (200 files: 193 sanitized, 7 quarantined, 822 records):
+Measured on `Secret-Wards-ToolKit/dev/input` (200 files: 193 sanitized, 7 quarantined, 822 records; `RAKSHA_SECRET=practice`):
 
 | Metric | Measured Result |
 |---|---|
 | Personal Data Leaked (`check_dev.py`) | **0 / 3,230 (0.0%)** across all 16 types, 3 scripts, and 6 channels |
 | Planted Canaries Found | **0 / 4** |
-| Medical Values Preserved | **4,808 / 4,855 (99.0%)** |
-| Patient Linking (`precision / recall / F0.5`) | **1.00 / 0.85 / 0.97** (`0` wrong merges) |
+| Medical Values Preserved | **4,853 / 4,855 (100.0%)** |
+| Patient Linking (`precision / recall / F0.5`) | **1.00 / 0.85 / 0.97** (`0` wrong merges; **756 / 756** in-record `PSN-*` consistency) |
 | Raw Copies of Broken/Unsupported Files | **0** |
-| Runtime & Peak Memory (`report.json`) | **1.07 s** wall time, **48.6 MB** peak RSS |
+| Runtime & Peak Memory (`report.json`) | **1.35 s** wall time, **51.05 MB** peak RSS (`CONTRACT OK`, `READY TO SUBMIT`) |
+
+Verified across five unseen-format synthetic stress suites (`generate_final_edge_suite.py`, `run_ml_hard_cases.py`, `run_chaos_test.py`, `run_extreme_chaos_test.py`, `run_tricky_edge_test.py`): **0** PII leaks, **0** canary leaks, **0** dropped clinical terms, `0.08–1.10 s` per run, and `<= 54 MB` peak RSS.
 
 ---
 
 ## 5. Known Limitations
 
 - **Severe spelling drift / partial fragments:** Name spellings diverging beyond phonetic equivalence and the 0.80 Jaro-Winkler threshold, or sparse notes without a corroborating secondary clue, are intentionally left unlinked (`"patient": null`) to avoid false merges.
-- **Conservative quarantine:** Files with corrupt byte sequences, truncated JSON, or mislabeled formats (e.g., JSON stored under `.csv`) are quarantined rather than partially recovered.
-- **Rule-based free-text generalization:** Unseen clinical phrasing that lacks structural anchors and falls outside known name/clinical word lists may occasionally be over-redacted (~1% medical token loss on practice data) or miss rare unanchored non-standard formats.
+- **Conservative quarantine:** Files with corrupt byte sequences, BOM-less raw UTF-16 null-byte streams, truncated JSON, or mislabeled formats (e.g., JSON stored under `.csv`) are quarantined rather than partially recovered.
+- **Unanchored free-text & date collisions:** Rare unanchored clinical phrases outside known name/clinical allowlists can occasionally be over-redacted (`2 / 4,855` medical values lost on practice data), and independent per-patient date shifts across rows of a multi-patient TSV can rarely coincide with another row's `DOB` under file-wide substring scanning.
